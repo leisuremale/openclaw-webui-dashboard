@@ -1306,10 +1306,11 @@ class OpenclawService:
         sessions_dir = os.path.join(OPENCLAW_ROOT, "agents", agent_id, "sessions")
         sessions_file = os.path.join(sessions_dir, "sessions.json")
 
-        # Collect all candidate jsonl files
+        # Collect all candidate jsonl files, excluding cron sessions
         candidate_files: set[str] = set()
+        cron_file_paths: set[str] = set()  # Known cron session files to exclude
 
-        # 1. From sessions.json metadata
+        # 1. From sessions.json metadata — separate cron vs non-cron
         if os.path.exists(sessions_file):
             try:
                 with open(sessions_file, "r", encoding="utf-8") as f:
@@ -1317,23 +1318,35 @@ class OpenclawService:
                 for session_key, session_info in sessions_meta.items():
                     if not isinstance(session_info, dict):
                         continue
-                    if ":cron:" in session_key:
-                        continue
                     sf = session_info.get("sessionFile")
-                    if sf and os.path.exists(sf):
+                    if not sf or not os.path.exists(sf):
+                        continue
+                    if ":cron:" in session_key:
+                        cron_file_paths.add(sf)
+                    else:
                         candidate_files.add(sf)
             except Exception:
                 pass
 
-        # 2. Scan directory for *.jsonl and *.jsonl.reset.* files
+        # 2. Scan directory for orphaned/renamed jsonl files not tracked in sessions.json
+        #    OpenClaw renames old sessions to .jsonl.deleted.<ts> or .jsonl.reset.<ts>
+        #    Also scan .jsonl.delete (old style) and .jsonl.checkpoint.* files
         if os.path.isdir(sessions_dir):
             for fn in os.listdir(sessions_dir):
                 # Skip trajectory files (different schema)
                 if "trajectory" in fn:
                     continue
-                # Accept: foo.jsonl, foo.jsonl.reset.2026-04-27T01-41-39.158Z
-                if fn.endswith(".jsonl") or ".jsonl.reset." in fn:
-                    candidate_files.add(os.path.join(sessions_dir, fn))
+                # Accept: foo.jsonl, foo.jsonl.reset.<ts>, foo.jsonl.deleted.<ts>,
+                #          foo.jsonl.delete, foo.jsonl.checkpoint.<uuid>
+                if ".jsonl" not in fn:
+                    continue
+                full_path = os.path.join(sessions_dir, fn)
+                # Exclude files already classified (cron or already added as non-cron)
+                if full_path in candidate_files or full_path in cron_file_paths:
+                    continue
+                # For orphaned files not in sessions.json, include them
+                # (they are almost always non-cron; cron sessions don't get orphaned)
+                candidate_files.add(full_path)
 
         # Accumulate raw data: date -> {messages, tokens, response_times[]}
         daily_raw: dict[str, dict] = defaultdict(lambda: {"messages": 0, "tokens": 0, "response_times": []})
