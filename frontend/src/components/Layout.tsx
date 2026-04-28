@@ -13,7 +13,7 @@ interface LayoutProps {
 const navItems: { id: Page; label: string; icon: React.ElementType }[] = [
   { id: 'overview', label: '总览', icon: LayoutDashboard },
   { id: 'sessions', label: '会话', icon: Radio },
-  { id: 'cron', label: 'Cron 任务', icon: Clock },
+  { id: 'cron', label: 'Cron', icon: Clock },
   { id: 'skills', label: 'Skills', icon: Layers },
   { id: 'models', label: '模型', icon: Cpu },
   { id: 'logs', label: '日志', icon: Terminal },

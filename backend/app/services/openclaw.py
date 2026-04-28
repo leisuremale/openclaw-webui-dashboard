@@ -971,6 +971,74 @@ class OpenclawService:
             "history": records,
         }
 
+    def _check_latest_version(self) -> Optional[dict]:
+        """Check npm registry for the latest openclaw version, with 6h cache.
+
+        Non-blocking: always returns cached data immediately. If cache is
+        stale, triggers a background thread to refresh it for next call.
+
+        Returns {"version": str, "checkedAt": iso-str} or None.
+        """
+        import threading
+        import urllib.request
+        import urllib.error
+        from datetime import datetime, timezone
+
+        update_check_path = os.path.join(OPENCLAW_ROOT, "update-check.json")
+        MIN_INTERVAL_SEC = 6 * 3600  # 6 hours
+
+        # Read existing cache
+        cached = self._read_json(update_check_path) or {}
+        last_checked_str = cached.get("lastCheckedAt", "")
+
+        needs_refresh = True
+        if last_checked_str:
+            try:
+                last_checked_dt = datetime.fromisoformat(last_checked_str.replace("Z", "+00:00"))
+                elapsed = (datetime.now(timezone.utc) - last_checked_dt).total_seconds()
+                if elapsed < MIN_INTERVAL_SEC:
+                    needs_refresh = False
+            except Exception:
+                pass
+
+        # Always return current cache immediately (non-blocking)
+        result = None
+        if cached.get("lastNotifiedVersion"):
+            result = {
+                "version": cached["lastNotifiedVersion"],
+                "checkedAt": last_checked_str,
+            }
+
+        # If stale, fire background refresh for the next request
+        if needs_refresh:
+            def _bg_refresh():
+                npm_url = "https://registry.npmjs.org/openclaw/latest"
+                try:
+                    req = urllib.request.Request(
+                        npm_url,
+                        headers={
+                            "Accept": "application/json",
+                            "User-Agent": "openclaw-dashboard/1.0",
+                        },
+                    )
+                    with urllib.request.urlopen(req, timeout=15) as resp:
+                        data = json.loads(resp.read().decode("utf-8"))
+                    latest = data.get("version", "")
+                    if latest:
+                        now_iso = datetime.now(timezone.utc).isoformat()
+                        with open(update_check_path, "w", encoding="utf-8") as f:
+                            json.dump({
+                                "lastCheckedAt": now_iso,
+                                "lastNotifiedVersion": latest,
+                                "lastNotifiedTag": "latest",
+                            }, f, indent=2, ensure_ascii=False)
+                except Exception:
+                    pass
+
+            threading.Thread(target=_bg_refresh, daemon=True).start()
+
+        return result
+
     def get_version_info(self) -> dict:
         """Get openclaw version and last update time."""
         import subprocess
@@ -1033,12 +1101,13 @@ class OpenclawService:
                 except Exception:
                     pass
 
-        # Get latest notified version from update-check
-        update_check_path = os.path.join(OPENCLAW_ROOT, "update-check.json")
-        uc = self._read_json(update_check_path)
-        if uc:
-            info["latestNotified"] = uc.get("lastNotifiedVersion", "")
-            info["lastCheckedAt"] = uc.get("lastCheckedAt", "")
+        # Get latest notified version: try live check if cache is stale, then fallback to cache
+        info["latestNotified"] = ""
+        info["lastCheckedAt"] = ""
+        latest_info = self._check_latest_version()
+        if latest_info:
+            info["latestNotified"] = latest_info.get("version", "")
+            info["lastCheckedAt"] = latest_info.get("checkedAt", "")
 
         return info
 

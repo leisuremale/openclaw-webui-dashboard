@@ -11,8 +11,6 @@ import {
   ChevronRight,
   ChevronDown,
   Zap,
-  TrendingUp,
-  TrendingDown,
   Tag,
   RefreshCw,
   History,
@@ -233,7 +231,58 @@ export function Overview({ onViewAgent }: OverviewProps) {
     return { days, globalMaxMsg, globalMaxTok, globalMaxRt };
   }, [metricsData]);
 
-  // Quick lookup for agent display info
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const yesterdayStr = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+
+  // Today / yesterday message & token totals
+  const todayMsgTotal = useMemo(() => {
+    let sum = 0;
+    for (const a of metricsData) {
+      const d = a.daily.find(d => d.date === todayStr);
+      if (d) sum += d.messages;
+    }
+    return sum;
+  }, [metricsData, todayStr]);
+
+  const yesterdayMsgTotal = useMemo(() => {
+    let sum = 0;
+    for (const a of metricsData) {
+      const d = a.daily.find(d => d.date === yesterdayStr);
+      if (d) sum += d.messages;
+    }
+    return sum;
+  }, [metricsData, yesterdayStr]);
+
+  const todayTokenTotal = useMemo(() => {
+    let sum = 0;
+    for (const a of metricsData) {
+      const d = a.daily.find(d => d.date === todayStr);
+      if (d) sum += d.tokens;
+    }
+    return sum;
+  }, [metricsData, todayStr]);
+
+  const yesterdayTokenTotal = useMemo(() => {
+    let sum = 0;
+    for (const a of metricsData) {
+      const d = a.daily.find(d => d.date === yesterdayStr);
+      if (d) sum += d.tokens;
+    }
+    return sum;
+  }, [metricsData, yesterdayStr]);
+
+  const msgChangePercent = yesterdayMsgTotal > 0
+    ? (((todayMsgTotal - yesterdayMsgTotal) / yesterdayMsgTotal) * 100).toFixed(0)
+    : '0';
+  const tokenChangePercent = yesterdayTokenTotal > 0
+    ? (((todayTokenTotal - yesterdayTokenTotal) / yesterdayTokenTotal) * 100).toFixed(0)
+    : '0';
+
+  const formatToken = (n: number) => {
+    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+    if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+    return String(n);
+  };
   const agentInfo = useMemo(() => {
     const map = new Map<string, { name: string; emoji: string; color: string }>();
     for (const a of metricsData) {
@@ -259,41 +308,47 @@ export function Overview({ onViewAgent }: OverviewProps) {
   if (loading || !data) return <LoadingSkeleton />;
 
   const { agents, stats, version } = data;
-  const cronHealthRate = stats.totalCronJobs > 0
-    ? Math.round((stats.okRuns / (stats.okRuns + stats.errorRuns || 1)) * 100)
-    : 100;
-
   const isNewer = version?.latestNotified && version?.version && version.latestNotified > version.version;
 
+  const msgChange = Number(msgChangePercent);
+  const tokenChange = Number(tokenChangePercent);
   const kpi = [
     {
-      label: 'Agent 总数',
-      value: stats.totalAgents,
+      label: '今日消息总数',
+      value: todayMsgTotal,
       icon: Bot,
       color: 'text-indigo-400',
       bg: 'bg-indigo-500/10',
-      sub: `${stats.enabledCronJobs} cron 任务运行中`,
+      sub: (
+        <span className={msgChange >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+          较昨日 {msgChange >= 0 ? '+' : ''}{msgChangePercent}%
+        </span>
+      ),
     },
     {
-      label: 'Cron 健康度',
-      value: `${cronHealthRate}%`,
-      icon: cronHealthRate >= 80 ? TrendingUp : TrendingDown,
-      color: cronHealthRate >= 80 ? 'text-emerald-400' : 'text-amber-400',
-      bg: cronHealthRate >= 80 ? 'bg-emerald-500/10' : 'bg-amber-500/10',
-      sub: `${stats.okRuns} 成功 / ${stats.errorRuns} 失败`,
+      label: '今日Token量',
+      value: formatToken(todayTokenTotal),
+      icon: Zap,
+      color: 'text-emerald-400',
+      bg: 'bg-emerald-500/10',
+      sub: (
+        <span className={tokenChange >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+          较昨日 {tokenChange >= 0 ? '+' : ''}{tokenChangePercent}%
+        </span>
+      ),
     },
     {
-      label: '今日成功',
+      label: '今日Cron成功',
       value: stats.okRuns,
       icon: CheckCircle2,
       color: 'text-emerald-400',
       bg: 'bg-emerald-500/10',
-      sub: '今日完成的任务',
+      sub: `${stats.enabledCronJobs} cron 任务运行中`,
       clickable: true,
       onClick: () => setCronDetail('ok'),
     },
     {
-      label: '今日失败',
+      label: '今日Cron失败',
       value: stats.errorRuns,
       icon: AlertTriangle,
       color: stats.errorRuns > 0 ? 'text-rose-400' : 'text-slate-500',
@@ -416,14 +471,11 @@ export function Overview({ onViewAgent }: OverviewProps) {
           <div className="flex-1 min-w-0">
             <div className="text-sm font-semibold text-slate-100">Agent 状态总览</div>
             <div className="text-[11px] text-slate-500">
-              {agents.filter(a => a._status === 'working').length} 个工作中 ·{' '}
-              {agents.filter(a => a._status === 'online').length} 个在线 ·{' '}
-              {agents.filter(a => a._status === 'idle').length} 个空闲
-              {agents.filter(a => a._status === 'warning' || a._status === 'error').length > 0 && (
-                <span className="text-rose-400 ml-1">
-                  · {agents.filter(a => a._status === 'warning' || a._status === 'error').length} 个异常
-                </span>
-              )}
+              共{agents.length}个Agent
+              · {agents.filter(a => a._status === 'working').length}个工作中
+              · {agents.filter(a => a._status === 'online').length}个在线
+              · {agents.filter(a => a._status === 'idle').length}个空闲
+              · {agents.filter(a => a._status === 'warning' || a._status === 'error').length}个故障
             </div>
           </div>
           <ChevronDown className={cn(

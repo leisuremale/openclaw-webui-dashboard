@@ -1,5 +1,29 @@
 # Dashboard 开发记录
 
+> 📋 **项目总结**: [memory/2026-04-27-Dashboard项目总结.md](./memory/2026-04-27-Dashboard项目总结.md)
+
+## 2026-04-28 会话
+
+### 首页 KPI 卡片重构
+- 左侧菜单栏：`Cron 任务` → `Cron`
+- 四大 KPI 卡片文案调整：
+  1. `Agent 总数` → `今日消息总数`，小字 `较昨日 ±X%`（绿涨红跌）
+  2. `Cron 健康度` → `今日Token量`，小字 `较昨日 ±X%`（绿涨红跌）
+  3. `今日成功` → `今日Cron成功`，小字 `X cron 任务运行中`
+  4. `今日失败` → `今日Cron失败`
+- Agent 状态总览小字改为 `共X个Agent · X个工作中 · X个在线 · X个空闲 · X个故障`
+- 消息/Token 数据来自 `api.agentsMetrics()` 当日汇总，比较基数为昨日数据
+- 故障数 = warning + error 状态 Agent 合计
+
+### 版本检查 - npm registry 实时查询
+- **问题**：原来只读本地 `~/.openclaw/update-check.json` 缓存，缓存中 `lastNotifiedVersion` 长期未更新导致一直显示"已是最新"
+- **解决**：后端新增 `_check_latest_version()` 方法，向 `registry.npmjs.org/openclaw/latest` 实时查询
+- **性能设计（零影响）**：
+  - 首次请求直接返回本地缓存（< 1ms），后台 daemon 线程异步刷新
+  - 缓存周期 6 小时，npm 请求超时 15s
+  - 网络失败自动回退到旧缓存，绝不阻塞 dashboard 响应
+  - 当前安装 2026.4.23 → 最新 2026.4.26，前端正确显示"有新版本"
+
 ## 2026-04-27 会话（续）
 
 ### Bug 修复：AgentDetail 加载卡住
