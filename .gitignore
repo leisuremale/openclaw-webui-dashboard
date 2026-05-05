@@ -23,3 +23,6 @@ logs/
 *.pyo
 .venv/
 *.egg-info/
+
+# Backend data (cookies, state, usage caches)
+backend/data/
