@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { cn } from '../lib/utils';
-import { api } from '../lib/api';
+import { api, isAbort } from '../lib/api';
 import { Terminal, RefreshCw, AlertTriangle, AlertCircle, Info, Clock, Zap, ChevronDown, ChevronRight } from 'lucide-react';
 
 interface LogInsight {
@@ -23,15 +23,8 @@ interface LogAnalysis {
   sources: string[];
 }
 
-interface LogViewerProps {
-  onBack?: () => void;
-}
-
-async function fetchLogs(type: string): Promise<string[]> {
-  const base = import.meta.env.PROD ? '' : '';
-  const res = await fetch(`${base}/api/logs/${type}?lines=500`);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
+async function fetchLogs(type: 'stdout' | 'stderr', signal?: AbortSignal): Promise<string[]> {
+  const data = await api.logs(type, { signal });
   return data.lines || [];
 }
 
@@ -67,7 +60,7 @@ const severityConfig: Record<string, { icon: typeof AlertTriangle; color: string
   info: { icon: Info, color: 'text-blue-400', bg: 'bg-blue-500/10 border-blue-500/25' },
 };
 
-export function LogViewer(_props: LogViewerProps) {
+export function LogViewer() {
   const [activeTab, setActiveTab] = useState<'stdout' | 'stderr'>('stderr');
   const [lines, setLines] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
@@ -75,24 +68,39 @@ export function LogViewer(_props: LogViewerProps) {
   const [analysis, setAnalysis] = useState<LogAnalysis | null>(null);
   const [insightsOpen, setInsightsOpen] = useState(true);
   const containerRef = useRef<HTMLDivElement>(null);
-
-  const load = () => {
-    setLoading(true);
-    fetchLogs(activeTab).then((l) => {
-      setLines(l);
-      setLoading(false);
-    }).catch(() => setLoading(false));
-  };
-
-  const loadAnalysis = () => {
-    api.logAnalysis().then((a: LogAnalysis) => setAnalysis(a)).catch(() => {});
-  };
+  const refetchRef = useRef<() => void>(() => {});
 
   useEffect(() => {
+    const ac = new AbortController();
+    const load = () => {
+      setLoading(true);
+      fetchLogs(activeTab, ac.signal)
+        .then((l) => {
+          setLines(l);
+          setLoading(false);
+        })
+        .catch((err) => {
+          if (isAbort(err)) return;
+          console.warn('log fetch failed:', err);
+          setLoading(false);
+        });
+    };
+    const loadAnalysis = () => {
+      api
+        .logAnalysis({ signal: ac.signal })
+        .then((a: LogAnalysis) => setAnalysis(a))
+        .catch((err) => {
+          if (!isAbort(err)) console.warn('log analysis failed:', err);
+        });
+    };
+    refetchRef.current = () => { load(); loadAnalysis(); };
     load();
     loadAnalysis();
     const iv = setInterval(() => { load(); loadAnalysis(); }, 10000);
-    return () => clearInterval(iv);
+    return () => {
+      clearInterval(iv);
+      ac.abort();
+    };
   }, [activeTab]);
 
   useEffect(() => {
@@ -122,7 +130,7 @@ export function LogViewer(_props: LogViewerProps) {
             自动滚动: {autoScroll ? '开' : '关'}
           </button>
           <button
-            onClick={() => { load(); loadAnalysis(); }}
+            onClick={() => refetchRef.current?.()}
             className="p-2 rounded-lg hover:bg-white/[0.04] text-slate-400 hover:text-slate-200 transition-colors"
             title="刷新"
           >

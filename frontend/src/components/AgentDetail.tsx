@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api } from '../lib/api';
+import { api, isAbort } from '../lib/api';
 import { cn, formatDuration, formatTime } from '../lib/utils';
 import { AgentMetricsChart } from './AgentMetricsChart';
 import {
@@ -14,45 +14,7 @@ import {
   FileText,
   Zap,
 } from 'lucide-react';
-
-interface Agent {
-  id: string;
-  name?: string;
-  identity?: { emoji?: string; name?: string };
-  _displayName: string;
-  _model_display: string;
-  _provider: string;
-  _status: string;
-  _cron_stats: { total: number; ok: number; error: number };
-  _skills_count: number;
-  workspace?: string;
-  model?: any;
-}
-
-interface CronJob {
-  id: string;
-  agentId: string;
-  name: string;
-  description: string;
-  enabled: boolean;
-  schedule: string;
-  scheduleDisplay?: string;
-  scheduleKind: string;
-  lastStatus: string;
-  consecutiveErrors: number;
-  lastError: string;
-  lastDurationMs: number;
-  lastRunAtMs?: number;
-  nextRunAtMs?: number;
-}
-
-interface Skill {
-  name: string;
-  source: string;
-  path: string;
-  description: string;
-  keywords?: string;
-}
+import type { Agent, AgentMetricsResponse, CronJob, Skill } from '../lib/types';
 
 interface AgentDetailProps {
   agentId: string;
@@ -63,20 +25,24 @@ export function AgentDetail({ agentId, onBack }: AgentDetailProps) {
   const [agent, setAgent] = useState<Agent | null>(null);
   const [jobs, setJobs] = useState<CronJob[]>([]);
   const [skills, setSkills] = useState<Skill[]>([]);
-  const [metrics, setMetrics] = useState<{ daily: any[]; total: any } | null>(null);
+  const [metrics, setMetrics] = useState<AgentMetricsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    setLoading(true);
-    setError(null);
+    const ac = new AbortController();
     Promise.all([
-      api.agents(),
-      api.cron(),
-      api.skills(agentId),
-      api.agentMetrics(agentId).catch(() => ({ daily: [], total: { messages: 0, tokens: 0 } })),
+      api.agents({ signal: ac.signal }),
+      api.cron({ signal: ac.signal }),
+      api.skills(agentId, { signal: ac.signal }),
+      api.agentMetrics(agentId, { signal: ac.signal }).catch((err) => {
+        if (isAbort(err)) throw err;
+        console.warn('agentMetrics load failed:', err);
+        return { daily: [], total: { messages: 0, tokens: 0 } };
+      }),
     ])
       .then(([agents, allJobs, agentSkills, agentMetrics]) => {
+        if (ac.signal.aborted) return;
         const found = agents.find((a: Agent) => a.id === agentId);
         setAgent(found || null);
         setJobs(allJobs.filter((j: CronJob) => j.agentId === agentId));
@@ -84,11 +50,13 @@ export function AgentDetail({ agentId, onBack }: AgentDetailProps) {
         setMetrics(agentMetrics);
       })
       .catch((err) => {
+        if (isAbort(err)) return;
         setError(err instanceof Error ? err.message : '加载失败');
       })
       .finally(() => {
-        setLoading(false);
+        if (!ac.signal.aborted) setLoading(false);
       });
+    return () => ac.abort();
   }, [agentId]);
 
   if (loading) {

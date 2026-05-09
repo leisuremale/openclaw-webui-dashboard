@@ -1,7 +1,9 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from app.services.openclaw import service
 
 router = APIRouter(prefix="/api")
+
+ALLOWED_LOG_TYPES = {"stdout", "stderr"}
 
 @router.get("/overview")
 def get_overview():
@@ -42,6 +44,11 @@ def get_log_analysis(lines: int = 500):
 @router.get("/logs/{log_type}")
 def get_logs(log_type: str, lines: int = 200):
     """Read tail of dashboard logs. log_type: stdout or stderr"""
+    if log_type not in ALLOWED_LOG_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid log_type. Allowed: {sorted(ALLOWED_LOG_TYPES)}",
+        )
     return service.get_logs(log_type, lines)
 
 @router.get("/version")

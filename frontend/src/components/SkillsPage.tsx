@@ -87,20 +87,19 @@ export function SkillsPage() {
 
   // Load active agent skills on demand (in case not preloaded)
   useEffect(() => {
-    if (!activeAgent) return;
-    if (skillsMap[activeAgent]) return;
-    setLoadingCounts((prev) => new Set(prev).add(activeAgent));
+    if (!activeAgent || skillsMap[activeAgent]) return;
+    let cancelled = false;
     api.skills(activeAgent).then((skills: Skill[]) => {
+      if (cancelled) return;
       setSkillsMap((prev) => ({ ...prev, [activeAgent]: skills }));
-      setLoadingCounts((prev) => {
-        const next = new Set(prev);
-        next.delete(activeAgent);
-        return next;
-      });
-    });
-  }, [activeAgent]);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [activeAgent, skillsMap]);
 
-  const currentSkills = activeAgent ? skillsMap[activeAgent] || [] : [];
+  const currentSkills = useMemo(
+    () => (activeAgent ? skillsMap[activeAgent] || [] : []),
+    [activeAgent, skillsMap],
+  );
 
   const filteredSkills = useMemo(() => {
     if (!search) return currentSkills;

@@ -5,7 +5,7 @@
 本地运行的智能仪表盘，实时监控 Agent 状态、Cron 任务、模型用量、系统日志，提供深度数据洞察与历史趋势分析。
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![React](https://img.shields.io/badge/react-19-blue.svg)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/typescript-5.x-blue.svg)](https://www.typescriptlang.org/)
 [![FastAPI](https://img.shields.io/badge/fastapi-0.115-green.svg)](https://fastapi.tiangolo.com/)
@@ -18,7 +18,7 @@
 ### 总览仪表盘
 ![Dashboard Overview](screenshots/overview.png)
 
-> 💡 更多页面截图请参见下方 [功能介绍](#-功能介绍) 章节。
+> 💡 更多页面截图请参见下方 [功能介绍](#-功能亮点) 章节。
 
 ---
 
@@ -68,45 +68,92 @@
 
 ## 🚀 快速开始
 
-### 访问（生产模式）
-
-开机自启动已配置，直接浏览器打开：
-
-```
-http://localhost:5173
-```
-
-或终端执行快捷命令：
+### 一键安装
 
 ```bash
-ocdash
+git clone https://github.com/leisuremale/openclaw-webui-dashboard.git
+cd openclaw-webui-dashboard
+./install.sh
 ```
+
+`install.sh` 会：
+1. 在 `backend/.venv/` 建立 Python 虚拟环境并安装依赖
+2. 在 `frontend/` 运行 `npm ci`
+3. 运行 `npm run build` 产出 `frontend/dist/`
+
+可选标志：`--backend` / `--frontend` / `--no-build`。
+
+### 运行（生产模式：FastAPI 同时托管 SPA + API）
+
+```bash
+backend/.venv/bin/python -m uvicorn app.main:app \
+  --app-dir backend \
+  --host 127.0.0.1 --port 18790
+```
+
+打开 <http://127.0.0.1:18790> 即可访问。
 
 ### 开发模式（前后端分离）
 
-后端（API 服务，端口 18790）：
 ```bash
-cd backend
-python3 -m uvicorn app.main:app --host 127.0.0.1 --port 18790 --reload
+# Terminal 1：FastAPI（端口 18790）
+backend/.venv/bin/python -m uvicorn app.main:app \
+  --app-dir backend --host 127.0.0.1 --port 18790 --reload
+
+# Terminal 2：Vite 开发服务器（端口 5173，自动代理 /api）
+cd frontend && npm run dev
 ```
 
-前端（Vite 开发服务器，端口 5173，自动代理 API）：
-```bash
-cd frontend
-npm run dev
-```
+打开 <http://localhost:5173>。
 
-### 构建生产版本
+### 重新构建前端
 
 ```bash
-cd frontend && npm run build
+cd frontend && npm run build   # 产物落到 frontend/dist/
 ```
-
-构建产物位于 `frontend/dist/`，后端会自动将其作为静态文件提供服务。
 
 ---
 
-## 🛠 管理命令
+## 🔐 安全与鉴权
+
+仪表盘默认**只接受回环（loopback）连接**：来自 `127.0.0.1`、`::1` 或 `localhost` 的请求直接放行。
+
+### 远程访问
+
+如果需要从局域网或反向代理访问，必须设置 `OPENCLAW_DASHBOARD_TOKEN`：
+
+```bash
+export OPENCLAW_DASHBOARD_TOKEN="$(openssl rand -hex 32)"
+```
+
+非回环请求需要在 `Authorization` 头部带：
+
+```
+Authorization: Bearer <token>
+```
+
+未设置 token 时，非回环请求一律 403。
+
+### CORS
+
+默认允许 `http://localhost:5173` 与 `http://127.0.0.1:5173`。覆盖：
+
+```bash
+export OPENCLAW_DASHBOARD_CORS="https://dashboard.example.com,https://localhost:5173"
+```
+
+设为 `*` 表示放行所有来源（不推荐）。
+
+### 路径守卫
+
+- `/api/logs/{type}` 仅接受 `stdout` 或 `stderr`，其他值返回 400
+- `/api/open-path` 仅接受 `~/.openclaw/` 内的路径；可执行文件、`.app` 包、符号链接全部拒绝；普通文件用 `open -R` 在 Finder 中**显示**而非启动
+
+---
+
+## 🛠 管理命令（macOS / launchctl）
+
+> 以下命令仅在通过 launchctl 注册了 `com.openclaw.dashboard` 时适用。
 
 | 操作 | 命令 |
 |------|------|
@@ -115,6 +162,15 @@ cd frontend && npm run build
 | 停止自启动 | `launchctl unload ~/Library/LaunchAgents/com.openclaw.dashboard.plist` |
 | 重新启用自启动 | `launchctl load ~/Library/LaunchAgents/com.openclaw.dashboard.plist` |
 | 查看 API 文档 | 开发模式下打开 `http://localhost:18790/docs` |
+
+`start.sh` 也支持通过环境变量覆盖路径：
+
+| 环境变量 | 默认值 |
+|---------|-------|
+| `OPENCLAW_HOME` | `$HOME/.openclaw` |
+| `OPENCLAW_DASHBOARD_DIR` | `$OPENCLAW_HOME/dashboard` |
+| `OPENCLAW_VENV_PYTHON` | `$OPENCLAW_DASHBOARD_DIR/backend/.venv/bin/python3` |
+| `OPENCLAW_NODE_BIN` | `$HOME/.openclaw/tools/node-v22.22.0/bin/node` |
 
 ---
 
@@ -126,18 +182,20 @@ cd frontend && npm run build
 | `GET` | `/api/overview` | 总览数据（KPI + Agent 状态 + 版本信息） |
 | `GET` | `/api/agents` | 所有 Agent 列表 |
 | `GET` | `/api/agents/metrics` | 所有 Agent 7 天性能数据汇总 |
-| `GET` | `/api/agents/{id}/metrics` | 指定 Agent 每日消息/Token/响应时间 |
+| `GET` | `/api/agents/{id}/metrics` | 指定 Agent 每日消息/Token/响应时间（UTC bucket） |
 | `GET` | `/api/cron` | Cron 任务列表及执行历史 |
 | `GET` | `/api/skills/{agent_id}` | 指定 Agent 的技能列表 |
 | `GET` | `/api/models` | 模型 Provider 和模型信息 |
 | `GET` | `/api/models/usage` | 缓存的模型用量数据 |
-| `POST`| `/api/models/usage/refresh/{provider}` | 刷新指定 Provider 用量 |
+| `POST`| `/api/models/usage/refresh/{provider}` | 刷新指定 Provider 用量（`minimax` / `deepseek`） |
 | `GET` | `/api/sessions/active` | 所有活跃会话（15 分钟窗口） |
-| `GET` | `/api/logs/{stdout\|stderr}` | 查看 Dashboard 日志 |
+| `GET` | `/api/logs/{stdout\|stderr}` | 查看 Dashboard 日志（仅这两个值） |
 | `GET` | `/api/logs/analysis` | 日志智能分析洞察 |
 | `GET` | `/api/version` | 当前版本信息 + 更新检查 |
 | `GET` | `/api/version/history` | 版本升级历史记录 |
-| `GET` | `/api/open-path` | 在 Finder 中打开指定路径 |
+| `GET` | `/api/open-path` | 在 Finder 中显示指定路径（仅 `~/.openclaw/` 内，禁止可执行文件） |
+
+未匹配到的 `/api/*` 路径返回 404（不再降级为 SPA 外壳）。
 
 ---
 
@@ -152,6 +210,7 @@ cd frontend && npm run build
 | **图标** | Lucide React | 现代开源图标库 |
 | **UI 组件** | Radix UI | 无障碍原语（Tabs / Tooltip / Collapsible） |
 | **日期处理** | date-fns | 轻量级日期格式化 |
+| **YAML 解析** | PyYAML 6 | SKILL.md frontmatter |
 | **后端服务器** | Uvicorn | ASGI 高性能服务器 |
 | **数据源** | 文件系统直读 | 零数据库依赖，直接从 `~/.openclaw/` 读取 |
 
@@ -160,43 +219,58 @@ cd frontend && npm run build
 ## 📁 项目结构
 
 ```
-dashboard/
-├── README.md                   # 本文件
-├── MEMORY.md                   # 开发历程与决策记录
-├── screenshots/                # 截图（用于文档）
+openclaw-webui-dashboard/
+├── README.md                          # 本文件
+├── MEMORY.md                          # 开发历程与决策记录
+├── install.sh                         # 一键安装（venv + npm + build）
+├── start.sh                           # 启动脚本（macOS launchd 友好）
+├── docs/
+│   └── MAC_VALIDATION.md              # 在另一台 Mac 验证的清单
+├── .github/workflows/
+│   └── ci.yml                         # PR/push 触发的 CI
+├── screenshots/                       # 截图（用于文档）
 ├── backend/
 │   ├── app/
-│   │   ├── main.py             # FastAPI 应用入口 + 静态文件服务
+│   │   ├── main.py                    # FastAPI 入口 + 鉴权 + 静态托管
 │   │   ├── routers/
-│   │   │   └── overview.py     # 全部 API 路由定义
+│   │   │   └── overview.py            # 全部 API 路由（带白名单守卫）
 │   │   ├── services/
-│   │   │   └── openclaw.py     # 核心业务逻辑（数据采集、指标计算）
-│   │   └── models/             # Pydantic 数据模型
-│   ├── data/                   # 持久化数据（版本历史、用量缓存）
-│   ├── scripts/                # 辅助脚本（MiniMax 刷新等）
-│   └── requirements.txt        # Python 依赖
+│   │   │   ├── openclaw.py            # OpenclawService 主类
+│   │   │   └── helpers/               # 纯函数（YAML/Cron/原子写）
+│   │   │       ├── agents.py
+│   │   │       ├── atomic_io.py
+│   │   │       ├── cron_format.py
+│   │   │       └── skills_parser.py
+│   │   └── models/                    # Pydantic 数据模型
+│   ├── data/                          # 持久化数据（版本历史、用量缓存）
+│   ├── scripts/                       # 辅助脚本（MiniMax / DeepSeek 刷新）
+│   └── requirements.txt               # Python 依赖
 └── frontend/
     ├── src/
-    │   ├── App.tsx             # 应用入口 + 页面路由
+    │   ├── App.tsx                    # 应用入口 + 页面路由
     │   ├── components/
-    │   │   ├── Layout.tsx      # 全局布局（侧边栏 + 内容区）
-    │   │   ├── Overview.tsx    # 总览仪表盘
-    │   │   ├── CronTimeline.tsx# Cron 时间线
-    │   │   ├── AgentDetail.tsx # Agent 详情页
-    │   │   ├── AgentMetricsChart.tsx  # 纯 SVG 性能图表
-    │   │   ├── AgentsComparisonModal.tsx # Agent 横向对比
-    │   │   ├── SkillsPage.tsx  # 技能管理
-    │   │   ├── ModelsPage.tsx  # 模型管理
-    │   │   ├── LogViewer.tsx   # 日志查看
-    │   │   └── ActiveSessions.tsx # 活跃会话
-    │   ├── assets/             # 静态资源
-    │   ├── lib/                # 工具函数与 API 客户端
-    │   ├── index.css           # 全局样式 + Tailwind
-    │   └── main.tsx            # React 入口
-    ├── index.html              # HTML 模板
-    ├── vite.config.ts          # Vite 配置（含 API 代理）
-    ├── tailwind.config.js      # Tailwind 配置
-    └── package.json            # 前端依赖
+    │   │   ├── Layout.tsx             # 全局布局
+    │   │   ├── Overview.tsx           # 总览仪表盘
+    │   │   ├── AgentCard.tsx          # 单个 Agent 卡片
+    │   │   ├── VersionHistoryModal.tsx
+    │   │   ├── CronDetailModal.tsx
+    │   │   ├── CronTimeline.tsx
+    │   │   ├── AgentDetail.tsx
+    │   │   ├── AgentMetricsChart.tsx
+    │   │   ├── AgentsComparisonModal.tsx
+    │   │   ├── chart-utils.tsx        # 共用 SVG 网格组件
+    │   │   ├── SkillsPage.tsx
+    │   │   ├── ModelsPage.tsx
+    │   │   ├── LogViewer.tsx
+    │   │   └── ActiveSessions.tsx
+    │   ├── lib/
+    │   │   ├── api.ts                 # API 客户端（统一 AbortSignal）
+    │   │   ├── types.ts               # 共享 API 响应类型
+    │   │   ├── chart-utils.ts         # 图表纯函数
+    │   │   └── utils.ts               # cn / formatTime / formatDuration
+    │   └── ...
+    ├── vite.config.ts                 # Vite 配置（dev /api 代理到 18790）
+    └── package.json
 ```
 
 ---
@@ -208,6 +282,23 @@ dashboard/
 - **暗色风格**：全局暗色主题，减轻长时间监控的视觉疲劳
 - **容错设计**：API 逐个降级，单点故障不阻塞整页渲染
 - **零阻塞**：后台线程异步刷新数据（版本检查、用量抓取），不影响前端响应
+- **默认 fail-safe**：仅监听回环，远程访问需显式提供 token
+
+---
+
+## 🤝 贡献
+
+PR 流程参见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)。提交前请确保：
+
+```bash
+# 前端
+cd frontend && npm run lint && npx tsc -b
+
+# 后端
+python -m py_compile backend/app/**/*.py
+```
+
+详细的迁移与验证步骤参见 [`docs/MAC_VALIDATION.md`](docs/MAC_VALIDATION.md)。
 
 ---
 

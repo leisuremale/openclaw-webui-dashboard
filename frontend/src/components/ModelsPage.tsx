@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api } from '../lib/api';
+import { api, isAbort } from '../lib/api';
 import { cn } from '../lib/utils';
 import { Cpu, Globe, Zap, ExternalLink, RefreshCw, TrendingUp, AlertTriangle } from 'lucide-react';
 
@@ -53,18 +53,12 @@ function formatContextWindow(k?: number): string {
   return `${k}`;
 }
 
-async function fetchModels(): Promise<ProviderInfo[]> {
-  const base = import.meta.env.PROD ? '' : '';
-  const res = await fetch(`${base}/api/models`);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+function fetchModels(signal?: AbortSignal): Promise<ProviderInfo[]> {
+  return api.models({ signal });
 }
 
-async function fetchAgents(): Promise<AgentLite[]> {
-  const base = import.meta.env.PROD ? '' : '';
-  const res = await fetch(`${base}/api/agents`);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+function fetchAgents(signal?: AbortSignal): Promise<AgentLite[]> {
+  return api.agents({ signal });
 }
 
 export function ModelsPage() {
@@ -75,17 +69,30 @@ export function ModelsPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    Promise.all([fetchModels(), fetchAgents(), api.modelUsage()]).then(([ps, ags, usage]) => {
-      setProviders(ps);
-      const agUsage: Record<string, AgentLite[]> = {};
-      ags.forEach((a: AgentLite) => {
-        if (!agUsage[a._provider]) agUsage[a._provider] = [];
-        agUsage[a._provider].push(a);
+    const ac = new AbortController();
+    Promise.all([
+      fetchModels(ac.signal),
+      fetchAgents(ac.signal),
+      api.modelUsage({ signal: ac.signal }),
+    ])
+      .then(([ps, ags, usage]) => {
+        if (ac.signal.aborted) return;
+        setProviders(ps);
+        const agUsage: Record<string, AgentLite[]> = {};
+        ags.forEach((a: AgentLite) => {
+          if (!agUsage[a._provider]) agUsage[a._provider] = [];
+          agUsage[a._provider].push(a);
+        });
+        setAgentUsage(agUsage);
+        setModelUsage(usage || {});
+        setLoading(false);
+      })
+      .catch((err) => {
+        if (isAbort(err)) return;
+        console.error('ModelsPage load failed:', err);
+        setLoading(false);
       });
-      setAgentUsage(agUsage);
-      setModelUsage(usage || {});
-      setLoading(false);
-    });
+    return () => ac.abort();
   }, []);
 
   const refreshUsage = async (provider: string) => {
