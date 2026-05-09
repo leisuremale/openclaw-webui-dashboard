@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { api } from '../lib/api';
+import { api, isAbort } from '../lib/api';
 import { cn, formatDuration, formatTime } from '../lib/utils';
 import {
   MessageSquare,
@@ -12,6 +12,7 @@ import {
   WifiOff,
   Zap,
 } from 'lucide-react';
+import type { Agent } from '../lib/types';
 
 interface ActiveSession {
   agentId: string;
@@ -26,12 +27,6 @@ interface ActiveSession {
   label: string;
   systemSent: boolean;
   chatType: string;
-}
-
-interface Agent {
-  id: string;
-  identity?: { emoji?: string; name?: string };
-  _displayName: string;
 }
 
 function formatAgo(ms: number): string {
@@ -60,21 +55,34 @@ export function ActiveSessions() {
   const [sessions, setSessions] = useState<ActiveSession[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
+  const [now, setNow] = useState<number>(() => Date.now());
 
   useEffect(() => {
+    const ac = new AbortController();
     const load = () => {
       Promise.all([
-        api.sessions().catch(() => [] as ActiveSession[]),
-        api.agents().catch(() => [] as Agent[]),
+        api.sessions({ signal: ac.signal }).catch((err) => {
+          if (!isAbort(err)) console.warn('sessions load failed:', err);
+          return [] as ActiveSession[];
+        }),
+        api.agents({ signal: ac.signal }).catch((err) => {
+          if (!isAbort(err)) console.warn('agents load failed:', err);
+          return [] as Agent[];
+        }),
       ]).then(([s, a]) => {
+        if (ac.signal.aborted) return;
         setSessions(s);
         setAgents(a);
+        setNow(Date.now());
         setLoading(false);
       });
     };
     load();
     const iv = setInterval(load, 10000);
-    return () => clearInterval(iv);
+    return () => {
+      clearInterval(iv);
+      ac.abort();
+    };
   }, []);
 
   const agentMap = useMemo(() => {
@@ -88,9 +96,8 @@ export function ActiveSessions() {
     return m;
   }, [agents]);
 
-  const userSessions = sessions.filter((s) => !s.isCron);
-  const cronSessions = sessions.filter((s) => s.isCron);
-  const now = Date.now();
+  const userSessions = useMemo(() => sessions.filter((s) => !s.isCron), [sessions]);
+  const cronSessions = useMemo(() => sessions.filter((s) => s.isCron), [sessions]);
 
   if (loading) {
     return (

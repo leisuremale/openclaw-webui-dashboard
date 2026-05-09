@@ -1,404 +1,23 @@
 import json
+import logging
 import os
 import time
-from datetime import datetime
-from typing import Any, Optional
+from datetime import datetime, timezone
+from typing import Optional
 
-OPENCLAW_ROOT = os.path.expanduser("~/.openclaw")
+from .helpers import (
+    AGENT_NAME_MAP,
+    AGENT_ORDER,
+    OPENCLAW_ROOT,
+    _atomic_write_json,
+    _cron_to_human,
+    _extract_skill_info,
+    _parse_skills_readme,
+    _parse_yaml_frontmatter,
+)
 
-AGENT_NAME_MAP = {
-    "main": "小叮当",
-    "mo-yan": "墨言",
-    "mo-ping": "墨评",
-    "xiao-le": "小乐",
-    "cto": "CTO",
-    "ma-nong": "码农",
-    "an-bao": "安保",
-    "xiao-xing": "小星",
-    "xiao-zhi": "小智",
-    "bei-ma": "贝玛",
-}
+logger = logging.getLogger(__name__)
 
-AGENT_ORDER = [
-    "main", "xiao-le", "xiao-zhi", "mo-yan", "an-bao",
-    "cto", "ma-nong", "xiao-xing", "bei-ma", "mo-ping",
-]
-
-# --- Cron expression → Chinese description ---
-
-WEEKDAY_NAMES = ["日", "一", "二", "三", "四", "五", "六"]
-
-def _cron_to_human(expr: str) -> str:
-    """Convert a 5-field cron expression to a Chinese description."""
-    if not expr:
-        return ""
-    parts = expr.strip().split()
-    if len(parts) != 5:
-        return expr  # unrecognized format, return as-is
-
-    minute, hour, dom, month, dow = parts
-
-    # Build time part
-    time_str = ""
-    if hour == "*" and minute == "*":
-        time_str = "每分钟"
-    elif hour == "*" and minute != "*":
-        if minute.startswith("*/"):
-            n = minute[2:]
-            time_str = f"每 {n} 分钟"
-        else:
-            time_str = f"每小时的第 {minute} 分"
-    elif hour != "*" and minute == "*":
-        time_str = f"每小时的第 {hour} 时"
-    elif hour != "*" and minute != "*":
-        if hour.startswith("*/") and minute == "0":
-            n = hour[2:]
-            time_str = f"每 {n} 小时"
-        elif minute.startswith("*/") and hour == "*":
-            pass  # handled above
-        else:
-            time_str = f"每天 {int(hour):02d}:{int(minute):02d}"
-
-    # Build day part
-    day_str = ""
-    if dom != "*":
-        day_str = f"每月 {dom} 日"
-    if dow != "*":
-        if dow.startswith("*/"):
-            pass
-        elif "-" in dow:
-            start, end = dow.split("-")
-            names = [WEEKDAY_NAMES[int(i)] for i in range(int(start), int(end) + 1)]
-            day_str = "工作日" if names == ["一", "二", "三", "四", "五"] else f"每周{'、'.join(names)}"
-        elif "," in dow:
-            names = [WEEKDAY_NAMES[int(d)] for d in dow.split(",")]
-            day_str = f"每周{'、'.join(names)}"
-        else:
-            try:
-                day_str = f"每周{WEEKDAY_NAMES[int(dow)]}"
-            except (ValueError, IndexError):
-                pass
-
-    # Build month part
-    month_str = ""
-    if month != "*":
-        if "," in month:
-            month_str = f"{month} 月"
-
-    if day_str:
-        return f"{day_str} {time_str}"
-    if month_str:
-        return f"每年{month_str} {time_str}"
-    return time_str
-
-def _parse_skills_readme(readme_path: str) -> dict[str, dict]:
-    """Parse a skills/README.md markdown table to extract {skill_name: {description, keywords}}."""
-    import re
-    result: dict[str, dict] = {}
-    try:
-        with open(readme_path, "r", encoding="utf-8") as f:
-            content = f.read()
-    except Exception:
-        return result
-
-    lines = content.split("\n")
-
-    # --- Pass 1: standard markdown tables ---
-    in_attachment_section = False  # Skip "已接入触发规则" / "挂载" sections
-    for line in lines:
-        line = line.strip()
-        # Detect section headers
-        if line.startswith("##") or line.startswith("###"):
-            section_lower = line.lstrip("#").strip().lower()
-            if any(kw in section_lower for kw in ("已接入", "挂载", "触发规则", "接入触发")):
-                in_attachment_section = True
-            else:
-                in_attachment_section = False
-            continue
-        if in_attachment_section:
-            continue
-        if not line.startswith("|") or not line.endswith("|"):
-            continue
-        # Skip header/separator rows
-        if "---" in line:
-            continue
-        cells = [c.strip() for c in line.strip("|").split("|")]
-        if len(cells) < 2:
-            continue
-        # First cell should contain skill name in backticks or bold markers
-        name_match = re.search(r'`([^`/]+)`', cells[0])
-        if not name_match:
-            # Try bold markers: **skill-name** or __skill-name__
-            name_match = re.search(r'\*\*([^*]+)\*\*', cells[0])
-        if not name_match:
-            # Try plain text skill name (for tables without formatting)
-            name_match = re.search(r'([a-zA-Z0-9][a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_-]+)*)', cells[0])
-        if not name_match:
-            continue
-        skill_name = name_match.group(1)
-        # Skip header-row names like "Skill", "技能", "子技能"
-        if skill_name.lower() in ("skill", "skills", "技能", "子技能", "子 skill"):
-            continue
-        # Clean skill name (remove trailing /)
-        skill_name = skill_name.rstrip("/")
-
-        # Handle table formats by column count:
-        #   2-col: | Skill | 说明 |   OR   | 子技能 | 触发关键词 |
-        #   3-col: | Skill | 说明 | 触发关键词 |
-        #   4-col Nuwa: | Skill | 人物 | 擅长领域 | 触发关键词 |
-        #   4-col xiao-le: | 技能 | 类型 | 主要功能 | 触发方式 |
-        if len(cells) >= 4:
-            # For 4+ columns, use the last two meaningful columns as desc & keywords
-            description = cells[-2] if len(cells) >= 3 else cells[1]
-            keywords = cells[-1]
-        elif len(cells) == 3:
-            description = cells[1]
-            keywords = cells[2]
-        elif len(cells) == 2:
-            # 2-column table: check if col 2 looks like trigger keywords
-            col2 = cells[1]
-            has_backtick_keywords = bool(re.search(r'`[^`]+`', col2))
-            if has_backtick_keywords:
-                # Looks like: | 子技能 | `触发词1`、`触发词2` |
-                description = ""
-                keywords = col2
-            else:
-                description = col2
-                keywords = ""
-
-        # Clean description: remove HTML, markdown links
-        description_clean = re.sub(r'<[^>]+>', '', description)
-        description_clean = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', description_clean)
-        # Clean keywords: split by "" or "" then join with ，
-        keywords_clean = re.sub(r'[""]["”]', '，', keywords)
-        keywords_clean = re.sub(r'["""]', '', keywords_clean)
-
-        result[skill_name] = {
-            "description": description_clean.strip(),
-            "keywords": keywords_clean.strip(),
-        }
-
-    # --- Pass 2: ad-hoc format (## skill_name sections with **触发词**： blocks) ---
-    # Only run if we didn't get enough table-parsed results
-    if not result:
-        current_skill = None
-        current_desc_parts = []
-        current_keywords = ""
-        in_keywords_block = False
-        for line in lines:
-            line_stripped = line.strip()
-            # Detect skill section: ## skill-name
-            section_match = re.match(r'^##\s+([a-zA-Z0-9_-]+)', line_stripped)
-            if section_match:
-                if current_skill:
-                    result[current_skill] = {
-                        "description": " ".join(current_desc_parts).strip()[:200],
-                        "keywords": current_keywords.strip(),
-                    }
-                current_skill = section_match.group(1)
-                current_desc_parts = []
-                current_keywords = ""
-                in_keywords_block = False
-                continue
-
-            if current_skill:
-                # Detect 触发词 section start
-                kw_header = re.match(r'\*\*触发词?\*\*[：:]?\s*(.*)', line_stripped)
-                if kw_header:
-                    in_keywords_block = True
-                    if kw_header.group(1):
-                        current_keywords = kw_header.group(1).strip()
-                    continue
-
-                # Collect keywords from bullet lines in keywords block
-                if in_keywords_block:
-                    bullet_match = re.match(r'^-\s*[`]?(.+?)[`]?\s*(?:/.*)?$', line_stripped)
-                    if bullet_match:
-                        kw = bullet_match.group(1).strip().strip('`')
-                        if kw:
-                            current_keywords += ("，" if current_keywords else "") + kw
-                        continue
-                    # Empty line or next section ends keywords block
-                    if not line_stripped:
-                        continue
-                    in_keywords_block = False
-
-                # Collect description text (extract **用途**： etc.)
-                if line_stripped and not line_stripped.startswith("|") and not line_stripped.startswith("#") and not line_stripped.startswith("-"):
-                    # Strip bold labels like **用途**： or **原则**：
-                    desc_clean = re.sub(r'\*\*[^*]+\*\*[：:]\s*', '', line_stripped)
-                    if desc_clean:
-                        current_desc_parts.append(desc_clean)
-
-        if current_skill and current_skill not in result:
-            result[current_skill] = {
-                "description": " ".join(current_desc_parts).strip()[:200],
-                "keywords": current_keywords.strip(),
-            }
-
-    return result
-
-
-def _parse_yaml_frontmatter(content: str) -> dict[str, str]:
-    """Extract simple YAML frontmatter key-value pairs from markdown.
-
-    Handles both proper frontmatter (--- ... ---) and broken frontmatter
-    (--- without closing delimiter, found in some global skills).
-    """
-    import re
-    result: dict[str, str] = {}
-
-    # Match proper --- ... --- frontmatter block
-    m = re.match(r'^---\s*\n(.*?)\n---', content, re.DOTALL)
-    if not m:
-        # Try variant: frontmatter starts with key:value lines, ends with ---
-        # Handle intermediate JSON/object blocks between last key and closing ---
-        m_variant = re.match(r'^((?:\w[\w_-]*\s*:.*\n)+)[\s\S]*?\n---', content)
-        if m_variant:
-            fm = m_variant.group(1)
-        else:
-            # Try broken frontmatter: --- at start, followed by key:value lines
-            m_broken = re.match(r'^---\s*\n((?:.+\n)+)', content)
-            if not m_broken:
-                return result
-            fm = m_broken.group(1)
-            # Only keep lines that look like key: value
-            fm_lines = []
-            for line in fm.split("\n"):
-                if re.match(r'^\w[\w_-]*\s*:', line.strip()):
-                    fm_lines.append(line)
-            if not fm_lines:
-                return result
-            fm = "\n".join(fm_lines)
-    else:
-        fm = m.group(1)
-
-    lines = fm.split("\n")
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        if not line:
-            i += 1
-            continue
-        # key: | (multiline literal)
-        kv_pipe = re.match(r'^(\w[\w_-]*)\s*:\s*\|$', line)
-        if kv_pipe:
-            key = kv_pipe.group(1).lower()
-            i += 1
-            # Collect indented lines as multiline value
-            ml_lines = []
-            while i < len(lines):
-                ml_line = lines[i]
-                if not ml_line.strip():
-                    i += 1
-                    continue
-                if ml_line.startswith("  ") or ml_line.startswith("\t"):
-                    ml_lines.append(ml_line.strip())
-                    i += 1
-                else:
-                    break
-            result[key] = " ".join(ml_lines)
-            continue
-        # key: | (multiline literal with value on same line)
-        kv_pipe_inline = re.match(r'^(\w[\w_-]*)\s*:\s*\|\s*(.+)', line)
-        if kv_pipe_inline:
-            key = kv_pipe_inline.group(1).lower()
-            first_val = kv_pipe_inline.group(2).strip()
-            ml_lines = [first_val] if first_val else []
-            i += 1
-            while i < len(lines):
-                ml_line = lines[i]
-                if not ml_line.strip():
-                    i += 1
-                    continue
-                if ml_line.startswith("  ") or ml_line.startswith("\t"):
-                    ml_lines.append(ml_line.strip())
-                    i += 1
-                else:
-                    break
-            result[key] = " ".join(ml_lines)
-            continue
-        # key: { (JSON/object value) — skip
-        if re.match(r'^(\w[\w_-]*)\s*:\s*\{', line):
-            i += 1
-            continue
-        # Simple key: value
-        kv = re.match(r'^(\w[\w_-]*)\s*:\s*(.+)', line)
-        if kv:
-            key = kv.group(1).lower()
-            val = kv.group(2).strip().strip('"').strip("'")
-            if val == "|":
-                i += 1
-                continue
-            result[key] = val
-        i += 1
-    return result
-
-
-def _extract_skill_info(
-    name: str, source: str, entry_path: str, readme_table: dict[str, dict]
-) -> dict:
-    """Extract skill info from SKILL.md and the parent README table."""
-    description = ""
-    keywords = ""
-
-    # First try SKILL.md - parse YAML frontmatter for description
-    skill_md = os.path.join(entry_path, "SKILL.md")
-    if os.path.exists(skill_md):
-        try:
-            with open(skill_md, "r", encoding="utf-8") as f:
-                full_content = f.read()
-        except Exception:
-            full_content = ""
-
-        # Parse YAML frontmatter
-        frontmatter = _parse_yaml_frontmatter(full_content)
-        if frontmatter.get("description"):
-            description = frontmatter["description"]
-            # Truncate for display
-            if len(description) > 200:
-                description = description[:200] + "…"
-
-        # Fallback: first non-header, non-frontmatter, non-metadata line
-        if not description:
-            import re as _re
-            for line in full_content.split("\n"):
-                stripped = line.strip()
-                if not stripped or stripped.startswith("#") or stripped.startswith("---"):
-                    continue
-                # Skip common YAML metadata keys
-                if _re.match(r'^(name|metadata|emoji|requires|install|version)\s*:', stripped):
-                    continue
-                # If line starts with "description:", extract the value
-                desc_match = _re.match(r'^description\s*:\s*(.+)', stripped)
-                if desc_match:
-                    description = desc_match.group(1).strip().strip('"').strip("'")[:200]
-                    break
-                description = stripped[:200]
-                break
-
-    # Then try the README table for richer info
-    # Priority: SKILL.md frontmatter > README table (only fallback when SKILL.md has no description)
-    table_info = readme_table.get(name, {})
-    if not description and table_info.get("description") and table_info["description"] != "—":
-        description = table_info["description"]
-    keywords = table_info.get("keywords", "")
-
-    # Get last updated time from directory mtime
-    last_updated_ms = 0
-    try:
-        last_updated_ms = int(os.path.getmtime(entry_path) * 1000)
-    except Exception:
-        pass
-
-    return {
-        "name": name,
-        "source": source,
-        "path": entry_path,
-        "description": description,
-        "keywords": keywords,
-        "lastUpdatedMs": last_updated_ms,
-    }
 
 
 class OpenclawService:
@@ -408,12 +27,13 @@ class OpenclawService:
         self.cron_state_path = os.path.join(OPENCLAW_ROOT, "cron", "jobs-state.json")
     
     def _read_json(self, path: str) -> Optional[dict]:
-        if not os.path.exists(path):
-            return None
         try:
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:
+        except FileNotFoundError:
+            return None
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("Failed to read JSON %s: %s", path, e)
             return None
     
     def get_config(self) -> dict:
@@ -560,15 +180,46 @@ class OpenclawService:
         return jobs
     
     def open_path(self, path: str) -> dict:
+        import stat as stat_mod
         import subprocess
         import urllib.parse
+
         decoded = urllib.parse.unquote(path)
-        # Security: only allow paths under OPENCLAW_ROOT
         real = os.path.realpath(decoded)
-        if not real.startswith(os.path.realpath(OPENCLAW_ROOT)):
-            return {"ok": False, "error": "Path outside openclaw root"}
+        if not os.path.exists(real):
+            return {"ok": False, "error": "Path does not exist"}
+
+        root = os.path.realpath(OPENCLAW_ROOT)
         try:
-            subprocess.run(["open", real], check=True, timeout=5)
+            if os.path.commonpath([real, root]) != root:
+                return {"ok": False, "error": "Path outside openclaw root"}
+        except ValueError:
+            return {"ok": False, "error": "Path outside openclaw root"}
+
+        try:
+            st = os.lstat(real)
+        except OSError as e:
+            return {"ok": False, "error": str(e)}
+
+        mode = st.st_mode
+        if stat_mod.S_ISLNK(mode):
+            return {"ok": False, "error": "Symlinks not permitted"}
+        is_dir = stat_mod.S_ISDIR(mode)
+        is_file = stat_mod.S_ISREG(mode)
+        if not (is_dir or is_file):
+            return {"ok": False, "error": "Only regular files or directories allowed"}
+        # Refuse executables / .app bundles (macOS treats these as launchable).
+        exec_bits = stat_mod.S_IXUSR | stat_mod.S_IXGRP | stat_mod.S_IXOTH
+        if is_file and (mode & exec_bits):
+            return {"ok": False, "error": "Executable files not permitted"}
+        if real.endswith(".app") or real.endswith(".app/"):
+            return {"ok": False, "error": ".app bundles not permitted"}
+
+        # Files: reveal in Finder (-R) instead of launching.
+        # Directories: open the folder.
+        argv = ["open", real] if is_dir else ["open", "-R", real]
+        try:
+            subprocess.run(argv, check=True, timeout=5)
             return {"ok": True, "path": real}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -948,11 +599,9 @@ class OpenclawService:
         if new_records:
             persisted_entries = persisted.get("entries", []) + new_records
             try:
-                os.makedirs(os.path.dirname(history_path), exist_ok=True)
-                with open(history_path, "w", encoding="utf-8") as f:
-                    json.dump({"entries": persisted_entries}, f, indent=2, ensure_ascii=False)
-            except Exception:
-                pass
+                _atomic_write_json(history_path, {"entries": persisted_entries})
+            except OSError as e:
+                logger.warning("Failed to persist version history %s: %s", history_path, e)
 
         # --- Format for response: sort by installedAtMs desc, mark current ---
         records = []
@@ -1026,14 +675,13 @@ class OpenclawService:
                     latest = data.get("version", "")
                     if latest:
                         now_iso = datetime.now(timezone.utc).isoformat()
-                        with open(update_check_path, "w", encoding="utf-8") as f:
-                            json.dump({
-                                "lastCheckedAt": now_iso,
-                                "lastNotifiedVersion": latest,
-                                "lastNotifiedTag": "latest",
-                            }, f, indent=2, ensure_ascii=False)
+                        _atomic_write_json(update_check_path, {
+                            "lastCheckedAt": now_iso,
+                            "lastNotifiedVersion": latest,
+                            "lastNotifiedTag": "latest",
+                        })
                 except Exception:
-                    pass
+                    logger.exception("npm version refresh failed")
 
             threading.Thread(target=_bg_refresh, daemon=True).start()
 
@@ -1382,6 +1030,12 @@ class OpenclawService:
                     ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
                 except Exception:
                     continue
+                # Normalize to UTC so date-bucketing matches the frontend's
+                # ISO date keys (also in UTC).
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                else:
+                    ts = ts.astimezone(timezone.utc)
 
                 date_key = ts.strftime("%Y-%m-%d")
 
@@ -1400,7 +1054,7 @@ class OpenclawService:
                     prev_ts = ts
 
         # Build daily array for last 7 days (fill zeros for missing days)
-        today = datetime.now().date()
+        today = datetime.now(timezone.utc).date()
         daily = []
         total_messages = 0
         total_tokens = 0

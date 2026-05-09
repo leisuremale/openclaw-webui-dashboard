@@ -1,22 +1,14 @@
 import { useEffect, useState } from 'react';
-import { api } from '../lib/api';
+import { api, isAbort } from '../lib/api';
 import { cn, formatDuration } from '../lib/utils';
 import {
   X,
   BarChart3,
 } from 'lucide-react';
 import { AgentMetricsChart } from './AgentMetricsChart';
-
-interface AgentMetricSummary {
-  id: string;
-  name: string;
-  emoji: string;
-  status: string;
-  totalMessages: number;
-  totalTokens: number;
-  avgResponseTimeMs: number;
-  daily: { date: string; messages: number; tokens: number; avgResponseTimeMs: number }[];
-}
+import type { AgentMetricSummary } from '../lib/types';
+import { ChartGridLines } from './chart-utils';
+import { formatDayLabel, isTodayIso } from '../lib/chart-utils';
 
 interface AgentsComparisonModalProps {
   onClose: () => void;
@@ -42,12 +34,19 @@ export function AgentsComparisonModal({ onClose }: AgentsComparisonModalProps) {
   const [hiddenAgents, setHiddenAgents] = useState<Set<string>>(new Set());
 
   useEffect(() => {
-    api.agentsMetrics()
+    const ac = new AbortController();
+    api.agentsMetrics({ signal: ac.signal })
       .then((d) => {
+        if (ac.signal.aborted) return;
         setData(d || []);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch((err) => {
+        if (isAbort(err)) return;
+        console.warn('agentsMetrics load failed:', err);
+        setLoading(false);
+      });
+    return () => ac.abort();
   }, []);
 
   useEffect(() => {
@@ -224,27 +223,13 @@ function ComparisonChart({ agents, onSelectAgent }: ComparisonChartProps) {
         className="block"
       >
         <g transform={`translate(${padding.left},${padding.top})`}>
-          {/* Grid lines */}
-          {[0, 0.25, 0.5, 0.75, 1].map((t) => {
-            const y = chartHeight * (1 - t);
-            return (
-              <line
-                key={t}
-                x1={0}
-                x2={chartWidth}
-                y1={y}
-                y2={y}
-                stroke="rgba(255,255,255,0.04)"
-                strokeDasharray={t === 0 ? undefined : '2 2'}
-              />
-            );
-          })}
+          <ChartGridLines width={chartWidth} height={chartHeight} ticks={[0, 0.25, 0.5, 0.75, 1]} />
 
           {/* Day groups */}
           {days.map((date, dayIdx) => {
             const gx = dayIdx * (groupWidth + groupGap);
-            const dayLabel = `${new Date(date).getMonth() + 1}/${new Date(date).getDate()}`;
-            const isToday = date === new Date().toISOString().slice(0, 10);
+            const dayLabel = formatDayLabel(date);
+            const isToday = isTodayIso(date);
 
             // Find max messages for this day across visible agents (for optional day-local normalization)
             // Using global normalization for cross-day comparison

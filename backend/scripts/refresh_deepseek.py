@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import re
+import sys
 import time
 
 CACHE_FILE = os.path.expanduser("~/.openclaw/dashboard/backend/data/model_usage.json")
@@ -73,6 +74,20 @@ async def main():
         )
 
         if is_login:
+            if not sys.stdin.isatty():
+                # Invoked non-interactively (e.g. via the dashboard API).
+                # Refuse rather than block forever on input().
+                result["deepseek"]["error"] = (
+                    "login required; run this script in a terminal to authenticate"
+                )
+                print("Login required but stdin is not a TTY; aborting.")
+                await context.close()
+                await browser.close()
+                merged = {**existing, **result}
+                os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
+                with open(CACHE_FILE, "w", encoding="utf-8") as f:
+                    json.dump(merged, f, indent=2, ensure_ascii=False)
+                return
             print("\n" + "=" * 60)
             print("Please log in to DeepSeek in the opened Chrome window")
             print("Press Enter when done...")

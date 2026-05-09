@@ -2,10 +2,10 @@
 # OpenClaw Dashboard - unified launcher
 # Starts both backend (FastAPI :18790) and frontend (Vite :5173)
 
-DASHBOARD_DIR="/Users/lijingyan/.openclaw/dashboard"
-VENV_PYTHON="$DASHBOARD_DIR/backend/.venv/bin/python3"
-NODE_BIN="/Users/lijingyan/.openclaw/tools/node-v22.22.0/bin/node"
-PATH="$DASHBOARD_DIR/backend/.venv/bin:/Users/lijingyan/.openclaw/tools/node-v22.22.0/bin:$PATH"
+DASHBOARD_DIR="${OPENCLAW_DASHBOARD_DIR:-${OPENCLAW_HOME:-$HOME/.openclaw}/dashboard}"
+VENV_PYTHON="${OPENCLAW_VENV_PYTHON:-$DASHBOARD_DIR/backend/.venv/bin/python3}"
+NODE_BIN="${OPENCLAW_NODE_BIN:-$HOME/.openclaw/tools/node-v22.22.0/bin/node}"
+PATH="$DASHBOARD_DIR/backend/.venv/bin:$(dirname "$NODE_BIN"):$PATH"
 
 cleanup() {
     echo "[dashboard] shutting down..."

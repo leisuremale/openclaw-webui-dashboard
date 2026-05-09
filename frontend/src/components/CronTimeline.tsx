@@ -1,29 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import { api } from '../lib/api';
+import { api, isAbort } from '../lib/api';
 import { cn, formatDuration, formatTime } from '../lib/utils';
 import { Clock, CheckCircle2, XCircle, AlertTriangle, Calendar, Search, Filter } from 'lucide-react';
+import type { Agent, CronJob } from '../lib/types';
 
-interface CronJob {
-  id: string;
-  agentId: string;
-  name: string;
-  description: string;
-  enabled: boolean;
-  schedule: string;
-  scheduleDisplay?: string;
-  scheduleKind: string;
-  lastStatus: string;
-  consecutiveErrors: number;
-  lastError: string;
-  lastDurationMs: number;
-  lastRunAtMs?: number;
-  nextRunAtMs?: number;
-}
-
-interface AgentLite {
-  id: string;
-  _displayName: string;
-}
+type AgentLite = Pick<Agent, 'id' | '_displayName'>;
 
 export function CronTimeline() {
   const [jobs, setJobs] = useState<CronJob[]>([]);
@@ -33,14 +14,33 @@ export function CronTimeline() {
   const [statusFilter, setStatusFilter] = useState<string | 'all'>('all');
 
   useEffect(() => {
-    api.cron().then(setJobs);
-    api.agents().then((ags: AgentLite[]) => setAgents(ags));
-    const iv = setInterval(() => api.cron().then(setJobs), 30000);
-    return () => clearInterval(iv);
+    const ac = new AbortController();
+    const loadCron = () =>
+      api
+        .cron({ signal: ac.signal })
+        .then(setJobs)
+        .catch((err) => {
+          if (!isAbort(err)) console.warn('cron load failed:', err);
+        });
+    loadCron();
+    api
+      .agents({ signal: ac.signal })
+      .then((ags: AgentLite[]) => setAgents(ags))
+      .catch((err) => {
+        if (!isAbort(err)) console.warn('agents load failed:', err);
+      });
+    const iv = setInterval(loadCron, 30000);
+    return () => {
+      clearInterval(iv);
+      ac.abort();
+    };
   }, []);
 
-  const agentNameMap: Record<string, string> = {};
-  agents.forEach((a) => { agentNameMap[a.id] = a._displayName; });
+  const agentNameMap = useMemo(() => {
+    const m: Record<string, string> = {};
+    agents.forEach((a) => { m[a.id] = a._displayName; });
+    return m;
+  }, [agents]);
 
   const filtered = useMemo(() => {
     let result = jobs;

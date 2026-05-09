@@ -1,13 +1,9 @@
 import { useMemo } from 'react';
 import { formatDuration } from '../lib/utils';
 import { BarChart3, Clock, MessageSquare, Zap } from 'lucide-react';
-
-interface DailyMetric {
-  date: string;
-  messages: number;
-  tokens: number;
-  avgResponseTimeMs: number;
-}
+import type { DailyMetric } from '../lib/types';
+import { ChartGridLines } from './chart-utils';
+import { formatDayLabel, isTodayIso } from '../lib/chart-utils';
 
 interface AgentMetricsChartProps {
   daily: DailyMetric[];
@@ -72,21 +68,7 @@ export function AgentMetricsChart({ daily, showHeader = true, height = 140 }: Ag
           className="block"
         >
           <g transform={`translate(${paddingLeft},${paddingTop})`}>
-            {/* Grid lines */}
-            {[0, 0.5, 1].map((t) => {
-              const y = chartHeight * (1 - t);
-              return (
-                <line
-                  key={t}
-                  x1={0}
-                  x2={chartWidth}
-                  y1={y}
-                  y2={y}
-                  stroke="rgba(255,255,255,0.04)"
-                  strokeDasharray={t === 0 ? undefined : '2 2'}
-                />
-              );
-            })}
+            <ChartGridLines width={chartWidth} height={chartHeight} />
 
             {/* Bars + line */}
             {daily.map((d, i) => {
@@ -97,8 +79,8 @@ export function AgentMetricsChart({ daily, showHeader = true, height = 140 }: Ag
 
               const rtY = chartHeight - (d.avgResponseTimeMs / maxResponse) * chartHeight;
 
-              const isToday = d.date === new Date().toISOString().slice(0, 10);
-              const dayLabel = `${new Date(d.date).getMonth() + 1}/${new Date(d.date).getDate()}`;
+              const isToday = isTodayIso(d.date);
+              const dayLabel = formatDayLabel(d.date);
 
               return (
                 <g key={d.date} transform={`translate(${x},0)`}>
