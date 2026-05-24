@@ -7,8 +7,9 @@ import { ModelsPage } from './components/ModelsPage';
 import { AgentDetail } from './components/AgentDetail';
 import { LogViewer } from './components/LogViewer';
 import { ActiveSessions } from './components/ActiveSessions';
+import { CollabPanel } from './components/CollabPanel';
 
-type Page = 'overview' | 'cron' | 'skills' | 'models' | 'logs' | 'sessions';
+type Page = 'overview' | 'cron' | 'skills' | 'models' | 'logs' | 'sessions' | 'collab';
 
 function PageContent({ page, onViewAgent }: { page: Page; onViewAgent: (id: string) => void }) {
   switch (page) {
@@ -24,6 +25,8 @@ function PageContent({ page, onViewAgent }: { page: Page; onViewAgent: (id: stri
       return <LogViewer key="logs" />;
     case 'sessions':
       return <ActiveSessions key="sessions" />;
+    case 'collab':
+      return <CollabPanel key="collab" />;
   }
 }
 

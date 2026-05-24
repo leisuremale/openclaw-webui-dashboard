@@ -1,8 +1,8 @@
 import { useState } from 'react';
-import { Activity, Clock, Cpu, Layers, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Radio, Terminal } from 'lucide-react';
+import { Activity, Clock, Cpu, GitBranch, Layers, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Radio, Terminal } from 'lucide-react';
 import { cn } from '../lib/utils';
 
-type Page = 'overview' | 'cron' | 'skills' | 'models' | 'logs' | 'sessions';
+type Page = 'overview' | 'cron' | 'skills' | 'models' | 'logs' | 'sessions' | 'collab';
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -13,6 +13,7 @@ interface LayoutProps {
 const navItems: { id: Page; label: string; icon: React.ElementType }[] = [
   { id: 'overview', label: '总览', icon: LayoutDashboard },
   { id: 'sessions', label: '会话', icon: Radio },
+  { id: 'collab', label: '协同调度', icon: GitBranch },
   { id: 'cron', label: 'Cron', icon: Clock },
   { id: 'skills', label: 'Skills', icon: Layers },
   { id: 'models', label: '模型', icon: Cpu },

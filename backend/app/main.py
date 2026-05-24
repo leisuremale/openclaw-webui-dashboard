@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
-from app.routers import overview
+from app.routers import overview, collab
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +92,7 @@ app.add_middleware(
 )
 
 app.include_router(overview.router)
+app.include_router(collab.router)
 
 @app.get("/api/health")
 def health():

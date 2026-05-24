@@ -27,6 +27,7 @@ export const api = {
   logs: (type: 'stdout' | 'stderr', init?: RequestInit) =>
     fetchJson(`/api/logs/${type}?lines=500`, init),
   logAnalysis: (init?: RequestInit) => fetchJson('/api/logs/analysis', init),
+  collab: (init?: RequestInit) => fetchJson('/api/collab/status', init),
   version: (init?: RequestInit) => fetchJson('/api/version', init),
   versionHistory: (init?: RequestInit) => fetchJson('/api/version/history', init),
 };

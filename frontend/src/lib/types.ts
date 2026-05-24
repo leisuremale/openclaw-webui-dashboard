@@ -113,3 +113,36 @@ export interface AgentMetricSummary {
   avgResponseTimeMs: number;
   daily: DailyMetric[];
 }
+
+// Collab (ACP) types
+export interface CollabTool {
+  type: 'claude-code' | 'codex';
+  name: string;
+  installed: boolean;
+  version?: string;
+  authOk: boolean;
+}
+
+export interface CollabTask {
+  sessionKey: string;
+  toolType: string;
+  targetAgentId: string;
+  spawnedByAgentId: string;
+  spawnedByAgentName: string;
+  spawnedByEmoji: string;
+  label: string;
+  taskLabel: string;
+  status: 'running' | 'done' | 'failed' | 'error';
+  startedAtMs: number;
+  updatedAtMs: number;
+  durationMs: number;
+  model?: string;
+  lastChannel?: string;
+}
+
+export interface CollabResponse {
+  tools: CollabTool[];
+  activeTasks: CollabTask[];
+  todayStats: Record<string, { calls: number; success: number; failed: number }>;
+  history: CollabTask[];
+}

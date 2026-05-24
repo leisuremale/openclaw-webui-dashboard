@@ -2,6 +2,47 @@
 
 > 📋 **项目总结**: [memory/2026-04-27-Dashboard项目总结.md](./memory/2026-04-27-Dashboard项目总结.md)
 
+## 2026-05-24 会话
+
+### 协同调度面板（Collab Panel）— 全新功能
+
+**设计**：
+- 需求：Le 要求 Dashboard 可视化 OpenClaw → Claude Code / Codex 的任务调度状态
+- 初始方案（v1）：以 psutil 进程扫描为主数据源，CTO 评审后否决
+- CTO 核心意见：sessions.json（已有 `spawnedBy` 字段）才是真正可靠的数据源，psutil 无法获知发起者/任务描述/完成状态
+- 修订方案（v2）：主数据源改为 `agents/*/sessions/sessions.json`，解析 ACP session key（`agent:{target}:acp:{uuid}`），利用 `spawnedBy` 追踪调用关系
+
+**实现**：
+- 后端 `services/collab.py`：遍历所有 agent sessions.json，按 ACP runtime 过滤，提取工具状态+任务+历史+今日统计
+- 后端 `routers/collab.py`：`GET /api/collab/status`
+- 认证探测：`claude -p "ok" --bare` 实际验证，非 `which`
+- 前端 `CollabPanel.tsx`：ToolStatusCard（安装+认证）+ ActiveCollabTask（从 ACP sessions）+ 历史时间线
+- 导航重命名：`外部Agent` → `协同调度`，图标 `Monitor` → `GitBranch`
+- 全部类型/路由/API 从 `external` 更名为 `collab`
+
+**已否决的设计**：
+- `psutil` 进程扫描 — 无法获得发起者/任务描述
+- `~/.clawdbot/active-tasks.json` 自建注册表 — 与 session store 重复
+- PR/CI 自动轮询 — GitHub rate limit 风险
+
+### ACP 链路打通
+
+**配置**：
+- `openclaw.json` 新增 ACP 配置：`enabled`、`dispatch.enabled`、`backend=acpx`、`defaultAgent=claude`
+- acpx 插件 `permissionMode` 设为 `approve-all`
+- Gateway 环境变量注入：创建 `service-env/claude-acp-env.sh`，从 Keychain 读取 `DEEPSEEK_API_KEY`，设置 `ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic`
+- 修改 `ai.openclaw.gateway-env-wrapper.sh` 自动 source 注入脚本
+
+**验证**：
+- `sessions_spawn(runtime=acp, agentId=claude)` → 成功，15s 完成
+- DeepSeek V4 Pro 通过 Anthropic 兼容 API 正常工作
+- 文件读写、命令执行、curl 网络请求均通过
+- 限制：大任务（8+ 文件）需拆分派发，后台进程操作不支持
+
+**Claude Code 调用方式**：
+- Le 自定义脚本 `~/.claude/switch-model-provider.sh`，别名 `cc-deepseek` / `cc-kimi`
+- 通过 Keychain → DeepSeek API key → Anthropic 兼容端点
+
 ## 2026-04-28 会话
 
 ### 首页 KPI 卡片重构
