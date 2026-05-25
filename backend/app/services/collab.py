@@ -36,6 +36,14 @@ TOOLS_CONFIG = [
 _TOOLS_CACHE: dict[str, Any] = {"at": 0.0, "value": None}
 _TOOLS_TTL_SECONDS = 300.0
 
+# Whole-status cache (tools + tasks + history + today_stats). Even with
+# check_tools() cached, get_collab_tasks() still walks every agent's
+# sessions.json on each call. Front-end polls every 10s, so a 3s cache
+# means at most one fs-walk per ~3s but consecutive page-opens within
+# that window are instant.
+_STATUS_CACHE: dict[str, Any] = {"at": 0.0, "value": None}
+_STATUS_TTL_SECONDS = 3.0
+
 
 def _check_auth_evidence(tool_type: str) -> bool:
     """Best-effort check that a tool *might* be authed, without invoking it.
@@ -83,9 +91,12 @@ def check_tools() -> list[dict]:
 
         if installed:
             try:
+                # 2s is plenty for a `--version` print; node CLI startup is
+                # typically 0.5-1.5s. If it takes longer something is wrong
+                # and we'd rather show "installed" than block the request.
                 result = subprocess.run(
                     [cfg["binary"], "--version"],
-                    capture_output=True, text=True, timeout=5,
+                    capture_output=True, text=True, timeout=2,
                 )
                 if result.stdout.strip():
                     version = result.stdout.strip().split("\n")[0]
@@ -243,16 +254,35 @@ def get_today_stats(tasks: list[dict]) -> dict[str, dict]:
 
 
 def get_collab_status():
-    """Full collab status endpoint."""
+    """Full collab status endpoint. 3s whole-response cache."""
+    now = time.time()
+    cached = _STATUS_CACHE["value"]
+    if cached is not None and (now - _STATUS_CACHE["at"]) < _STATUS_TTL_SECONDS:
+        return cached
+
     tools = check_tools()
     all_tasks = get_collab_tasks()
 
     active = [t for t in all_tasks if t["status"] == "running"]
     finished = [t for t in all_tasks if t["status"] != "running"]
 
-    return {
+    payload = {
         "tools": tools,
         "activeTasks": active,
         "todayStats": get_today_stats(all_tasks),
         "history": finished[:50],  # last 50 completed/failed
     }
+    _STATUS_CACHE["value"] = payload
+    _STATUS_CACHE["at"] = now
+    return payload
+
+
+def prewarm() -> None:
+    """Warm `check_tools()` so the first user request doesn't pay the
+    subprocess `--version` cost. Called from a background thread at app
+    startup (see app/main.py).
+    """
+    try:
+        check_tools()
+    except Exception as e:
+        logger.warning("collab prewarm failed: %s", e)
