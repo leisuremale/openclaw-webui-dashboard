@@ -2,6 +2,7 @@ import hmac
 import ipaddress
 import logging
 import os
+import threading
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from app.routers import overview, collab
+from app.services import collab as collab_service
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +146,15 @@ app.add_middleware(
 
 app.include_router(overview.router)
 app.include_router(collab.router)
+
+
+@app.on_event("startup")
+def _prewarm_caches() -> None:
+    """Pre-warm caches in a daemon thread so the first user request doesn't
+    pay the cold-start cost. Most expensive item: `collab.check_tools()`
+    which spawns `claude --version` + `codex --version` (1-2s each)."""
+    threading.Thread(target=collab_service.prewarm, daemon=True, name="collab-prewarm").start()
+
 
 @app.get("/api/health")
 def health():
