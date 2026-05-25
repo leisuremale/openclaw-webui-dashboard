@@ -158,14 +158,20 @@ function TaskCard({ task, onNavigate }: { task: CollabTask; onNavigate?: (p: Nav
             {task.model && (
               <span className="text-slate-600 font-mono">{task.model}</span>
             )}
-            <button
-              type="button"
-              onClick={() => onNavigate?.('sessions')}
-              className="ml-auto flex items-center gap-1 text-indigo-400 hover:text-indigo-300 transition-colors"
-            >
-              <ExternalLink className="w-3 h-3" />
-              查看会话
-            </button>
+            {/* Only meaningful for running tasks — ActiveSessions lists
+                the 15-min active window, so a finished/failed task's session
+                wouldn't show up there. Hide the affordance to avoid the
+                "click leads nowhere" trap. */}
+            {isRunning && (
+              <button
+                type="button"
+                onClick={() => onNavigate?.('sessions')}
+                className="ml-auto flex items-center gap-1 text-indigo-400 hover:text-indigo-300 transition-colors"
+              >
+                <ExternalLink className="w-3 h-3" />
+                查看会话
+              </button>
+            )}
           </div>
         </div>
       </div>
