@@ -1,6 +1,7 @@
 import { cn, formatDuration, formatTime } from '../lib/utils';
 import { AlertTriangle, CheckCircle2, X } from 'lucide-react';
 import type { CronJob } from '../lib/types';
+import { ModalShell } from './ModalShell';
 
 interface CronDetailModalProps {
   kind: 'ok' | 'error';
@@ -12,14 +13,11 @@ interface CronDetailModalProps {
 export function CronDetailModal({ kind, jobs, agentNameMap, onClose }: CronDetailModalProps) {
   const isOk = kind === 'ok';
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-sm animate-in fade-in"
-      onClick={onClose}
+    <ModalShell
+      onClose={onClose}
+      labelledBy="cron-detail-title"
+      className="glass-card rounded-2xl w-full max-w-lg max-h-[80vh] flex flex-col shadow-2xl border border-white/[0.08]"
     >
-      <div
-        className="glass-card rounded-2xl w-full max-w-lg max-h-[80vh] flex flex-col shadow-2xl border border-white/[0.08]"
-        onClick={(e) => e.stopPropagation()}
-      >
         <div className="flex items-center justify-between p-5 border-b border-white/[0.06]">
           <div className="flex items-center gap-3">
             <div className={cn(
@@ -32,7 +30,7 @@ export function CronDetailModal({ kind, jobs, agentNameMap, onClose }: CronDetai
               }
             </div>
             <div>
-              <div className="font-semibold text-slate-100 text-sm">
+              <div id="cron-detail-title" className="font-semibold text-slate-100 text-sm">
                 {isOk ? '今日成功任务' : '今日失败任务'}
               </div>
               <div className="text-[11px] text-slate-500">
@@ -95,7 +93,6 @@ export function CronDetailModal({ kind, jobs, agentNameMap, onClose }: CronDetai
             </div>
           )}
         </div>
-      </div>
-    </div>
+    </ModalShell>
   );
 }

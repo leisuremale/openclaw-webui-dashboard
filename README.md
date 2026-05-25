@@ -134,6 +134,16 @@ Authorization: Bearer <token>
 
 未设置 token 时，非回环请求一律 403。
 
+### 反向代理
+
+为防止伪造 `X-Forwarded-For` 头绕过 loopback 鉴权，**任何带 `X-Forwarded-For` / `X-Real-IP` / `Forwarded` / `X-Forwarded-Host` 头的请求都视为非 loopback**，必须带 Token——即使 `request.client.host == 127.0.0.1`。
+
+若你确实在受信代理后运行（并且该代理会剥离客户端伪造的转发头），显式 opt-in：
+
+```bash
+export OPENCLAW_DASHBOARD_TRUST_PROXY=1
+```
+
 ### CORS
 
 默认允许 `http://localhost:5173` 与 `http://127.0.0.1:5173`。覆盖：
@@ -142,12 +152,13 @@ Authorization: Bearer <token>
 export OPENCLAW_DASHBOARD_CORS="https://dashboard.example.com,https://localhost:5173"
 ```
 
-设为 `*` 表示放行所有来源（不推荐）。
+设为 `*` 表示放行所有来源（不推荐）。注意：浏览器规范不允许 `Access-Control-Allow-Origin: *` 与凭证请求共存，因此 `*` 时启动期会强制 `allow_credentials=False` 并打 warning，浏览器 `fetch()` 的 `Authorization` 头将不被发送——`*` 与 Token 鉴权事实上互斥。
 
 ### 路径守卫
 
-- `/api/logs/{type}` 仅接受 `stdout` 或 `stderr`，其他值返回 400
-- `/api/open-path` 仅接受 `~/.openclaw/` 内的路径；可执行文件、`.app` 包、符号链接全部拒绝；普通文件用 `open -R` 在 Finder 中**显示**而非启动
+- `/api/logs/{type}` 仅接受 `stdout` 或 `stderr`（用 FastAPI `Literal`，非法值自动 422）
+- `/api/open-path` 仅接受 `~/.openclaw/` 内的路径；**逐层 `lstat` 拒绝任何 symlink**（不再只看终态），可执行文件用平台相关的判定（POSIX 看 mode bits，Windows 看扩展名），`.app` 包仍拒绝
+- 文件管理器 reveal 跨平台：macOS=`open -R`、Windows=`explorer.exe /select,`、Linux=`xdg-open <parent dir>`
 
 ---
 
@@ -165,12 +176,15 @@ export OPENCLAW_DASHBOARD_CORS="https://dashboard.example.com,https://localhost:
 
 `start.sh` 也支持通过环境变量覆盖路径：
 
-| 环境变量 | 默认值 |
-|---------|-------|
-| `OPENCLAW_HOME` | `$HOME/.openclaw` |
-| `OPENCLAW_DASHBOARD_DIR` | `$OPENCLAW_HOME/dashboard` |
-| `OPENCLAW_VENV_PYTHON` | `$OPENCLAW_DASHBOARD_DIR/backend/.venv/bin/python3` |
-| `OPENCLAW_NODE_BIN` | `$HOME/.openclaw/tools/node-v22.22.0/bin/node` |
+| 环境变量 | 默认值 | 说明 |
+|---------|-------|------|
+| `OPENCLAW_HOME` | `$HOME/.openclaw` | OpenClaw 数据根目录 |
+| `OPENCLAW_DASHBOARD_DIR` | `$OPENCLAW_HOME/dashboard` | Dashboard 安装目录 |
+| `OPENCLAW_VENV_PYTHON` | `$OPENCLAW_DASHBOARD_DIR/backend/.venv/bin/python3` | Python 解释器 |
+| `OPENCLAW_NODE_BIN` | `$HOME/.openclaw/tools/node-v22.22.0/bin/node` | Node 二进制 |
+| `OPENCLAW_DASHBOARD_TOKEN` | _未设置_ | 非 loopback 请求的 Bearer token |
+| `OPENCLAW_DASHBOARD_CORS` | `http://localhost:5173,http://127.0.0.1:5173` | 允许的 CORS 源（逗号分隔；`*` 会强制关闭 credentials） |
+| `OPENCLAW_DASHBOARD_TRUST_PROXY` | _未设置_ | 设为 `1` 才允许带转发头的 loopback 请求跳过 token |
 
 ---
 
@@ -187,7 +201,9 @@ export OPENCLAW_DASHBOARD_CORS="https://dashboard.example.com,https://localhost:
 | `GET` | `/api/skills/{agent_id}` | 指定 Agent 的技能列表 |
 | `GET` | `/api/models` | 模型 Provider 和模型信息 |
 | `GET` | `/api/models/usage` | 缓存的模型用量数据 |
-| `POST`| `/api/models/usage/refresh/{provider}` | 刷新指定 Provider 用量（`minimax` / `deepseek`） |
+| `POST`| `/api/models/usage/refresh/{provider}` | 启动后台刷新（`minimax` / `deepseek`），立即返回 `{ok, running, started_at}` |
+| `GET` | `/api/models/usage/refresh/{provider}/status` | 查询某 Provider 的刷新任务状态（运行中 / 完成 / 失败 + 耗时） |
+| `GET` | `/api/collab/status` | 协同调度（ACP）状态：工具就绪、活跃任务、历史、今日统计 |
 | `GET` | `/api/sessions/active` | 所有活跃会话（15 分钟窗口） |
 | `GET` | `/api/logs/{stdout\|stderr}` | 查看 Dashboard 日志（仅这两个值） |
 | `GET` | `/api/logs/analysis` | 日志智能分析洞察 |

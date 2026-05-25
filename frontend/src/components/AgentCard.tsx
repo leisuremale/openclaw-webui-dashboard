@@ -19,11 +19,10 @@ const statusConfig: Record<string, { label: string; color: string; bg: string; i
 
 interface AgentCardProps {
   agent: Agent;
-  idx: number;
   onViewAgent?: (id: string) => void;
 }
 
-export function AgentCard({ agent, idx, onViewAgent }: AgentCardProps) {
+export function AgentCard({ agent, onViewAgent }: AgentCardProps) {
   const status = statusConfig[agent._status] || statusConfig.idle;
   const StatusIcon = status.icon;
   const emoji = agent.identity?.emoji || (agent.id === 'main' ? '🎯' : '🤖');
@@ -35,8 +34,7 @@ export function AgentCard({ agent, idx, onViewAgent }: AgentCardProps) {
   return (
     <div
       onClick={() => onViewAgent?.(agent.id)}
-      className="glass-card glass-card-hover rounded-xl p-5 group cursor-pointer animate-in fade-in"
-      style={{ animationDelay: `${idx * 60}ms` }}
+      className="glass-card glass-card-hover rounded-xl p-5 group cursor-pointer"
     >
       {/* Header */}
       <div className="flex items-start justify-between mb-4">

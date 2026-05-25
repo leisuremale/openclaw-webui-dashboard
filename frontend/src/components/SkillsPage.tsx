@@ -1,31 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { api } from '../lib/api';
+import { api, isAbort } from '../lib/api';
 import { cn } from '../lib/utils';
 import { Layers, FileText, FolderOpen, Search, ExternalLink, Clock } from 'lucide-react';
+import type { Agent as ApiAgent, Skill as ApiSkill } from '../lib/types';
 
-interface Skill {
-  name: string;
-  source: string;
-  path: string;
-  description: string;
-  keywords?: string;
-  lastUpdatedMs?: number;
-}
-
-interface Agent {
-  id: string;
-  name?: string;
-  identity?: { emoji?: string; name?: string };
-  _displayName: string;
-}
-
-const API_BASE = import.meta.env.PROD ? '' : '';
+// Local Skill includes lastUpdatedMs that the global type doesn't yet declare.
+type Skill = ApiSkill & { lastUpdatedMs?: number };
+type Agent = Pick<ApiAgent, 'id' | 'name' | 'identity' | '_displayName'>;
 
 async function openInFinder(path: string) {
   try {
-    await fetch(`${API_BASE}/api/open-path?path=${encodeURIComponent(path)}`);
+    await api.openPath(path);
   } catch {
-    // silent fail
+    // silent fail; user-facing feedback would be noise.
   }
 }
 
@@ -67,33 +54,51 @@ export function SkillsPage() {
   const [activeAgent, setActiveAgent] = useState<string | null>(null);
   const [search, setSearch] = useState('');
 
-  // Load agents and preload all skill counts
+  // Load agents and preload all skill counts.
   useEffect(() => {
-    api.agents().then((ags: Agent[]) => {
-      setAgents(ags);
-      if (ags.length > 0) setActiveAgent(ags[0].id);
-      // Preload skills for ALL agents to show counts
-      const ids = new Set(ags.map((a) => a.id));
-      setLoadingCounts(ids);
-      Promise.all(
-        ags.map((a) =>
-          api.skills(a.id).then((skills: Skill[]) => {
-            setSkillsMap((prev) => ({ ...prev, [a.id]: skills }));
-          }).catch(() => {})
-        )
-      ).finally(() => setLoadingCounts(new Set()));
-    });
+    const ac = new AbortController();
+    api.agents({ signal: ac.signal })
+      .then((ags) => {
+        if (ac.signal.aborted) return;
+        setAgents(ags);
+        if (ags.length > 0) setActiveAgent(ags[0].id);
+        // Preload skills for ALL agents to show counts.
+        const ids = new Set(ags.map((a) => a.id));
+        setLoadingCounts(ids);
+        Promise.all(
+          ags.map((a) =>
+            api.skills(a.id, { signal: ac.signal })
+              .then((skills) => {
+                if (ac.signal.aborted) return;
+                setSkillsMap((prev) => ({ ...prev, [a.id]: skills as Skill[] }));
+              })
+              .catch((err) => {
+                if (!isAbort(err)) console.warn('skills preload failed:', err);
+              }),
+          ),
+        ).finally(() => {
+          if (!ac.signal.aborted) setLoadingCounts(new Set());
+        });
+      })
+      .catch((err) => {
+        if (!isAbort(err)) console.warn('agents load failed:', err);
+      });
+    return () => ac.abort();
   }, []);
 
-  // Load active agent skills on demand (in case not preloaded)
+  // Load active agent skills on demand (in case not preloaded).
   useEffect(() => {
     if (!activeAgent || skillsMap[activeAgent]) return;
-    let cancelled = false;
-    api.skills(activeAgent).then((skills: Skill[]) => {
-      if (cancelled) return;
-      setSkillsMap((prev) => ({ ...prev, [activeAgent]: skills }));
-    }).catch(() => {});
-    return () => { cancelled = true; };
+    const ac = new AbortController();
+    api.skills(activeAgent, { signal: ac.signal })
+      .then((skills) => {
+        if (ac.signal.aborted) return;
+        setSkillsMap((prev) => ({ ...prev, [activeAgent]: skills as Skill[] }));
+      })
+      .catch((err) => {
+        if (!isAbort(err)) console.warn('skills load failed:', err);
+      });
+    return () => ac.abort();
   }, [activeAgent, skillsMap]);
 
   const currentSkills = useMemo(
@@ -197,11 +202,10 @@ export function SkillsPage() {
             </div>
           ) : (
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
-              {filteredSkills.map((skill, idx) => (
+              {filteredSkills.map((skill) => (
                 <div
                   key={skill.name}
-                  className="glass-card glass-card-hover rounded-lg p-4 flex items-start gap-3 animate-in fade-in"
-                  style={{ animationDelay: `${idx * 40}ms` }}
+                  className="glass-card glass-card-hover rounded-lg p-4 flex items-start gap-3"
                 >
                   <div className={cn(
                     'w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0',

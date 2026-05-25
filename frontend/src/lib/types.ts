@@ -132,7 +132,9 @@ export interface CollabTask {
   spawnedByEmoji: string;
   label: string;
   taskLabel: string;
-  status: 'running' | 'done' | 'failed' | 'error';
+  // Backend may emit "unknown" when the session lacks a status field, plus
+  // other variants we don't enumerate. Keep as string so callers must guard.
+  status: string;
   startedAtMs: number;
   updatedAtMs: number;
   durationMs: number;
@@ -146,3 +148,86 @@ export interface CollabResponse {
   todayStats: Record<string, { calls: number; success: number; failed: number }>;
   history: CollabTask[];
 }
+
+// Active sessions (one per agent × session-key)
+export interface ActiveSession {
+  agentId: string;
+  agentName: string;
+  sessionKey: string;
+  isCron: boolean;
+  status: string;
+  updatedAtMs: number;
+  startedAtMs: number;
+  channel: string;
+  model: string;
+  label: string;
+  systemSent: boolean;
+  chatType: string;
+}
+
+// Models
+export interface ModelInfo {
+  id: string;
+  name: string;
+  contextWindow?: number;
+}
+
+export interface ProviderInfo {
+  provider: string;
+  baseUrl: string;
+  models: ModelInfo[];
+}
+
+export interface UsageInfo {
+  plan?: string;
+  quota_calls?: number;
+  quota_hours?: number;
+  used_percent?: number;
+  total_credit?: number;
+  balance?: number;
+  voice_used_percent?: number;
+  updated_at?: number;
+  error?: string | null;
+  page_percents_found?: number[];
+}
+
+export type ModelUsage = Record<string, UsageInfo>;
+
+// Log analysis
+export interface LogInsight {
+  type: string;
+  severity: 'error' | 'warning' | 'info';
+  title: string;
+  detail: string;
+  agentId?: string;
+  agentName?: string;
+  maxAge?: number;
+  count?: number;
+  lastSeen?: string;
+  diagId?: string;
+  line?: string;
+}
+
+export interface LogAnalysis {
+  insights: LogInsight[];
+  stats: Record<string, number>;
+  sources: string[];
+}
+
+export interface LogsResponse {
+  lines: string[];
+  path?: string;
+  error?: string;
+}
+
+// Generic ok/error envelope used by refresh + open-path endpoints
+export interface OkResponse {
+  ok: boolean;
+  output?: string;
+  error?: string;
+  path?: string;
+}
+
+// UI page identifier — kept in one place so App.tsx, Layout.tsx, and any
+// component that wants to navigate use the same union.
+export type Page = 'overview' | 'cron' | 'skills' | 'models' | 'logs' | 'sessions' | 'collab';

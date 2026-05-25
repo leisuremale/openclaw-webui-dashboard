@@ -3,9 +3,18 @@
 Public re-exports keep `from app.services.helpers import X` ergonomic for the
 service module.
 """
-from .agents import AGENT_NAME_MAP, AGENT_ORDER, OPENCLAW_ROOT
+from .agents import (
+    AGENT_NAME_MAP,
+    AGENT_ORDER,
+    AGENTS_DIR,
+    OPENCLAW_CONFIG_PATH,
+    OPENCLAW_ROOT,
+    default_emoji,
+    load_agent_identities,
+)
 from .atomic_io import _atomic_write_json
 from .cron_format import WEEKDAY_NAMES, _cron_to_human
+from .log_tail import tail_lines
 from .skills_parser import (
     _extract_skill_info,
     _parse_skills_readme,
@@ -15,6 +24,8 @@ from .skills_parser import (
 __all__ = [
     "AGENT_NAME_MAP",
     "AGENT_ORDER",
+    "AGENTS_DIR",
+    "OPENCLAW_CONFIG_PATH",
     "OPENCLAW_ROOT",
     "WEEKDAY_NAMES",
     "_atomic_write_json",
@@ -22,4 +33,7 @@ __all__ = [
     "_extract_skill_info",
     "_parse_skills_readme",
     "_parse_yaml_frontmatter",
+    "default_emoji",
+    "load_agent_identities",
+    "tail_lines",
 ]

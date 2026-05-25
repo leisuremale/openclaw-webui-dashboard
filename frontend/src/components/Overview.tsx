@@ -1,10 +1,10 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useCallback } from 'react';
 import { api, isAbort } from '../lib/api';
-import { cn, formatDuration } from '../lib/utils';
+import { usePolling } from '../lib/usePolling';
+import { cn, compareSemver } from '../lib/utils';
 import {
   Bot,
   CheckCircle2,
-  Clock,
   AlertTriangle,
   ChevronRight,
   ChevronDown,
@@ -13,7 +13,6 @@ import {
   RefreshCw,
   History,
   BarChart3,
-  MessageSquare,
 } from 'lucide-react';
 import type {
   Agent,
@@ -23,8 +22,10 @@ import type {
   VersionHistoryResp,
 } from '../lib/types';
 import { AgentCard } from './AgentCard';
+import { AgentsStatusBreakdown } from './AgentsStatusBreakdown';
 import { VersionHistoryModal } from './VersionHistoryModal';
 import { CronDetailModal } from './CronDetailModal';
+import { agentColor } from '../lib/agent-colors';
 
 function LoadingSkeleton() {
   return (
@@ -43,56 +44,28 @@ function LoadingSkeleton() {
   );
 }
 
-const AGENT_COLORS: Record<string, string> = {
-  main: '#818cf8',
-  'xiao-le': '#34d399',
-  'xiao-zhi': '#fbbf24',
-  'mo-yan': '#f87171',
-  'an-bao': '#38bdf8',
-  cto: '#a78bfa',
-  'ma-nong': '#e879f9',
-  'xiao-xing': '#a3e635',
-  'bei-ma': '#22d3ee',
-  'mo-ping': '#fb923c',
-};
-
 interface OverviewProps {
   onViewAgent?: (id: string) => void;
 }
 
 export function Overview({ onViewAgent }: OverviewProps) {
-  const [data, setData] = useState<OverviewResponse | null>(null);
-  const [loading, setLoading] = useState(true);
   const [showHistory, setShowHistory] = useState(false);
   const [historyData, setHistoryData] = useState<VersionHistoryResp | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [metricsData, setMetricsData] = useState<AgentMetricSummary[]>([]);
   const [expanded, setExpanded] = useState(false);
   const [cronDetail, setCronDetail] = useState<'ok' | 'error' | null>(null);
+  // `dayTick` advances at most once per minute so "today" derivations
+  // (cron-job filtering, message totals) cross midnight without a refresh.
+  // We don't need second precision; a once-per-minute tick is enough to keep
+  // the cutoff close to wall-clock midnight while costing one re-render/min.
+  const [dayTick, setDayTick] = useState(0);
 
-  useEffect(() => {
-    const ac = new AbortController();
-    let isFirst = true;
-    const load = () =>
-      api
-        .overview({ signal: ac.signal })
-        .then((d) => {
-          setData(d);
-          if (isFirst) {
-            setLoading(false);
-            isFirst = false;
-          }
-        })
-        .catch((err) => {
-          if (!isAbort(err)) console.warn('overview load failed:', err);
-        });
-    load();
-    const iv = setInterval(load, 15000);
-    return () => {
-      clearInterval(iv);
-      ac.abort();
-    };
-  }, []);
+  const overviewFetcher = useCallback(
+    (signal: AbortSignal) => api.overview({ signal }),
+    [],
+  );
+  const { data, loading } = usePolling<OverviewResponse>(overviewFetcher, 15000);
 
   useEffect(() => {
     const ac = new AbortController();
@@ -105,20 +78,21 @@ export function Overview({ onViewAgent }: OverviewProps) {
     return () => ac.abort();
   }, []);
 
-  // ESC to close modals or collapse detail
   useEffect(() => {
+    const iv = setInterval(() => setDayTick((t) => t + 1), 60_000);
+    return () => clearInterval(iv);
+  }, []);
+
+  // ESC to collapse the agents-status breakdown panel. Modal ESC handling
+  // lives inside ModalShell so we don't double-bind for showHistory/cronDetail.
+  useEffect(() => {
+    if (!expanded) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        if (showHistory) setShowHistory(false);
-        else if (cronDetail) setCronDetail(null);
-        else if (expanded) setExpanded(false);
-      }
+      if (e.key === 'Escape' && !showHistory && !cronDetail) setExpanded(false);
     };
-    if (showHistory || expanded || cronDetail) {
-      window.addEventListener('keydown', onKey);
-      return () => window.removeEventListener('keydown', onKey);
-    }
-  }, [showHistory, expanded, cronDetail]);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [expanded, showHistory, cronDetail]);
 
   const openHistory = () => {
     setShowHistory(true);
@@ -163,7 +137,9 @@ export function Overview({ onViewAgent }: OverviewProps) {
       todayStr: now.toISOString().slice(0, 10),
       yesterdayStr: new Date(now.getTime() - 86400000).toISOString().slice(0, 10),
     };
-  }, []);
+    // Re-derive when dayTick advances so midnight rollover takes effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dayTick]);
 
   // Today / yesterday message & token totals
   const todayMsgTotal = useMemo(() => {
@@ -202,12 +178,16 @@ export function Overview({ onViewAgent }: OverviewProps) {
     return sum;
   }, [metricsData, yesterdayStr]);
 
-  const msgChangePercent = yesterdayMsgTotal > 0
-    ? (((todayMsgTotal - yesterdayMsgTotal) / yesterdayMsgTotal) * 100).toFixed(0)
-    : '0';
-  const tokenChangePercent = yesterdayTokenTotal > 0
-    ? (((todayTokenTotal - yesterdayTokenTotal) / yesterdayTokenTotal) * 100).toFixed(0)
-    : '0';
+  // `null` signals "no comparable baseline" so the KPI sub-line renders an
+  // em-dash instead of a misleading "+0%".
+  const msgChangePercent =
+    yesterdayMsgTotal > 0
+      ? (((todayMsgTotal - yesterdayMsgTotal) / yesterdayMsgTotal) * 100).toFixed(0)
+      : null;
+  const tokenChangePercent =
+    yesterdayTokenTotal > 0
+      ? (((todayTokenTotal - yesterdayTokenTotal) / yesterdayTokenTotal) * 100).toFixed(0)
+      : null;
 
   const formatToken = (n: number) => {
     if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
@@ -217,15 +197,18 @@ export function Overview({ onViewAgent }: OverviewProps) {
   const agentInfo = useMemo(() => {
     const map = new Map<string, { name: string; emoji: string; color: string }>();
     for (const a of metricsData) {
-      map.set(a.id, { name: a.name, emoji: a.emoji, color: AGENT_COLORS[a.id] || '#64748b' });
+      map.set(a.id, { name: a.name, emoji: a.emoji, color: agentColor(a.id) });
     }
     return map;
   }, [metricsData]);
 
-  // Filter today's cron jobs (must be before early return for hooks ordering)
+  // Filter today's cron jobs (must be before early return for hooks ordering).
+  // Recomputed once per minute via dayTick so the cutoff follows wall-clock
+  // midnight on long-lived sessions.
   const todayStart = useMemo(() => {
     const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dayTick]);
   const rawCronJobs = useMemo<CronJob[]>(() => data?.cronJobs ?? [], [data]);
   const rawAgents = useMemo<Agent[]>(() => data?.agents ?? [], [data]);
   const todayOkJobs = useMemo(
@@ -245,10 +228,14 @@ export function Overview({ onViewAgent }: OverviewProps) {
   if (loading || !data) return <LoadingSkeleton />;
 
   const { agents, stats, version } = data;
-  const isNewer = version?.latestNotified && version?.version && version.latestNotified > version.version;
+  const isNewer = !!(
+    version?.latestNotified &&
+    version?.version &&
+    compareSemver(version.latestNotified, version.version) > 0
+  );
 
-  const msgChange = Number(msgChangePercent);
-  const tokenChange = Number(tokenChangePercent);
+  const msgChange = msgChangePercent !== null ? Number(msgChangePercent) : 0;
+  const tokenChange = tokenChangePercent !== null ? Number(tokenChangePercent) : 0;
   const kpi = [
     {
       label: '今日消息总数',
@@ -256,7 +243,9 @@ export function Overview({ onViewAgent }: OverviewProps) {
       icon: Bot,
       color: 'text-indigo-400',
       bg: 'bg-indigo-500/10',
-      sub: (
+      sub: msgChangePercent === null ? (
+        <span className="text-slate-500">较昨日 —</span>
+      ) : (
         <span className={msgChange >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
           较昨日 {msgChange >= 0 ? '+' : ''}{msgChangePercent}%
         </span>
@@ -268,7 +257,9 @@ export function Overview({ onViewAgent }: OverviewProps) {
       icon: Zap,
       color: 'text-emerald-400',
       bg: 'bg-emerald-500/10',
-      sub: (
+      sub: tokenChangePercent === null ? (
+        <span className="text-slate-500">较昨日 —</span>
+      ) : (
         <span className={tokenChange >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
           较昨日 {tokenChange >= 0 ? '+' : ''}{tokenChangePercent}%
         </span>
@@ -421,202 +412,10 @@ export function Overview({ onViewAgent }: OverviewProps) {
           )} />
         </button>
 
-        {/* Expanded detail — SVG vertical bar charts */}
-        {expanded && dailyBreakdown.days.length > 0 && (() => {
-          const { days, globalMaxMsg, globalMaxTok, globalMaxRt } = dailyBreakdown;
-          const dayCount = days.length;
-          const maxAgentsPerDay = Math.max(1, ...days.map(d => d.entries.length));
-          const barW = 18;
-          const barGap = 3;
-          const groupW = Math.max(80, maxAgentsPerDay * (barW + barGap) + 4);
-          const groupGap = 1;
-          const chartW = dayCount * (groupW + groupGap);
-          const barH = 110;
-          const padTop = 16;
-          const svgW = chartW + 32;
-          const svgH = barH + padTop + 24;
-
-          // Build agent-index lookup per day for consistent bar positions
-          const allAgentIds = [...new Set(days.flatMap(d => d.entries.map(e => e.id)))].sort();
-
-          return (
-            <div className="pt-4 pb-1 px-4 space-y-5 border-t border-white/[0.04]">
-              {/* 消息量 */}
-              <div>
-                <div className="flex items-center gap-2 mb-2">
-                  <MessageSquare className="w-3.5 h-3.5 text-indigo-400" />
-                  <span className="text-xs font-medium text-slate-400">消息量（近 7 天）</span>
-                </div>
-                <div className="overflow-x-auto">
-                  <svg width={svgW} height={svgH} className="block">
-                    <g transform={`translate(22,${padTop})`}>
-                      {[0, 0.5, 1].map(t => {
-                        const y = barH * (1 - t);
-                        return <line key={t} x1={0} x2={chartW} y1={y} y2={y} stroke="rgba(255,255,255,0.04)" strokeDasharray="2 2" />;
-                      })}
-                      {days.map((day, di) => {
-                        const gx = di * (groupW + groupGap);
-                        const totalBarsW = day.entries.length * barW + (day.entries.length - 1) * barGap;
-                        const startX = (groupW - totalBarsW) / 2;
-                        const sorted = [...day.entries].filter(e => e.messages > 0).sort((a, b) => b.messages - a.messages);
-                        return (
-                          <g key={day.date} transform={`translate(${gx},0)`}>
-                            <text x={groupW / 2} y={barH + 14} textAnchor="middle" fill="#475569" fontSize="10">
-                              {new Date(day.date).getMonth() + 1}/{new Date(day.date).getDate()}
-                            </text>
-                            {sorted.map((entry, ai) => {
-                              const info = agentInfo.get(entry.id) || { name: entry.id, emoji: '🤖', color: '#64748b' };
-                              const h = (entry.messages / globalMaxMsg) * barH;
-                              const bx = startX + ai * (barW + barGap);
-                              return (
-                                <g key={entry.id}>
-                                  <rect x={bx} y={barH - h} width={barW} height={h} rx={2} fill={info.color} opacity={0.85} />
-                                  <text x={bx + barW / 2} y={barH - h - 4} textAnchor="middle" fill="#94a3b8" fontSize="8">
-                                    {info.name}
-                                  </text>
-                                  <title>{`${info.name} · ${day.date}\n消息: ${entry.messages}`}</title>
-                                </g>
-                              );
-                            })}
-                          </g>
-                        );
-                      })}
-                    </g>
-                  </svg>
-                </div>
-              </div>
-
-              {/* Token 使用量 */}
-              <div className="pt-2 border-t border-white/[0.04]">
-                <div className="flex items-center gap-2 mb-2">
-                  <Zap className="w-3.5 h-3.5 text-emerald-400" />
-                  <span className="text-xs font-medium text-slate-400">Token 使用量（近 7 天）</span>
-                </div>
-                <div className="overflow-x-auto">
-                  <svg width={svgW} height={svgH} className="block">
-                    <g transform={`translate(22,${padTop})`}>
-                      {[0, 0.5, 1].map(t => {
-                        const y = barH * (1 - t);
-                        return <line key={t} x1={0} x2={chartW} y1={y} y2={y} stroke="rgba(255,255,255,0.04)" strokeDasharray="2 2" />;
-                      })}
-                      {days.map((day, di) => {
-                        const gx = di * (groupW + groupGap);
-                        const sorted = [...day.entries].filter(e => e.tokens > 0).sort((a, b) => b.tokens - a.tokens);
-                        const totalBarsW = sorted.length * barW + (sorted.length - 1) * barGap;
-                        const startX = (groupW - totalBarsW) / 2;
-                        return (
-                          <g key={day.date} transform={`translate(${gx},0)`}>
-                            <text x={groupW / 2} y={barH + 14} textAnchor="middle" fill="#475569" fontSize="10">
-                              {new Date(day.date).getMonth() + 1}/{new Date(day.date).getDate()}
-                            </text>
-                            {sorted.map((entry, ai) => {
-                              const info = agentInfo.get(entry.id) || { name: entry.id, emoji: '🤖', color: '#64748b' };
-                              const h = (entry.tokens / globalMaxTok) * barH;
-                              const bx = startX + ai * (barW + barGap);
-                              const formatted = entry.tokens >= 1000 ? `${(entry.tokens / 1000).toFixed(1)}k` : `${entry.tokens}`;
-                              return (
-                                <g key={entry.id}>
-                                  <rect x={bx} y={barH - h} width={barW} height={h} rx={2} fill={info.color} opacity={0.85} />
-                                  <text x={bx + barW / 2} y={barH - h - 4} textAnchor="middle" fill="#94a3b8" fontSize="8">
-                                    {info.name}
-                                  </text>
-                                  <title>{`${info.name} · ${day.date}\nTokens: ${formatted}`}</title>
-                                </g>
-                              );
-                            })}
-                          </g>
-                        );
-                      })}
-                    </g>
-                  </svg>
-                </div>
-              </div>
-
-              {/* 响应时间 */}
-              <div className="pt-2 border-t border-white/[0.04]">
-                <div className="flex items-center gap-2 mb-2">
-                  <Clock className="w-3.5 h-3.5 text-amber-400" />
-                  <span className="text-xs font-medium text-slate-400">响应时间（近 7 天）</span>
-                </div>
-                <div className="overflow-x-auto">
-                  <svg width={svgW} height={svgH} className="block">
-                    <g transform={`translate(22,${padTop})`}>
-                      {[0, 0.5, 1].map(t => {
-                        const y = barH * (1 - t);
-                        return <line key={t} x1={0} x2={chartW} y1={y} y2={y} stroke="rgba(255,255,255,0.04)" strokeDasharray="2 2" />;
-                      })}
-                      {/* Draw connecting lines per agent across days */}
-                      {allAgentIds.map(aid => {
-                        const info = agentInfo.get(aid) || { name: aid, emoji: '🤖', color: '#64748b' };
-                        const pts: [number, number][] = [];
-                        days.forEach((day, di) => {
-                          const entry = day.entries.find(e => e.id === aid && e.rt > 0);
-                          if (entry) {
-                            const gx = di * (groupW + groupGap);
-                            const sorted = day.entries.filter(e => e.rt > 0);
-                            const totalW = sorted.length * barW + (sorted.length - 1) * barGap;
-                            const startX = (groupW - totalW) / 2;
-                            const idx = sorted.findIndex(e => e.id === aid);
-                            if (idx >= 0) {
-                              const cx = gx + startX + idx * (barW + barGap) + barW / 2;
-                              const cy = barH - (entry.rt / globalMaxRt) * barH;
-                              pts.push([cx, cy]);
-                            }
-                          }
-                        });
-                        if (pts.length < 2) return null;
-                        return (
-                          <polyline
-                            key={aid}
-                            points={pts.map(p => p.join(',')).join(' ')}
-                            fill="none"
-                            stroke={info.color}
-                            strokeWidth={1}
-                            opacity={0.4}
-                          />
-                        );
-                      })}
-                      {/* Draw dots per day */}
-                      {days.map((day, di) => {
-                        const gx = di * (groupW + groupGap);
-                        const sorted = [...day.entries].filter(e => e.rt > 0).sort((a, b) => b.rt - a.rt);
-                        const totalW = sorted.length * barW + (sorted.length - 1) * barGap;
-                        const startX = (groupW - totalW) / 2;
-                        return (
-                          <g key={day.date} transform={`translate(${gx},0)`}>
-                            <text x={groupW / 2} y={barH + 14} textAnchor="middle" fill="#475569" fontSize="10">
-                              {new Date(day.date).getMonth() + 1}/{new Date(day.date).getDate()}
-                            </text>
-                            {sorted.map((entry, ai) => {
-                              const info = agentInfo.get(entry.id) || { name: entry.id, emoji: '🤖', color: '#64748b' };
-                              const cy = barH - (entry.rt / globalMaxRt) * barH;
-                              const cx = startX + ai * (barW + barGap) + barW / 2;
-                              return (
-                                <g key={entry.id}>
-                                  <circle cx={cx} cy={cy} r={4} fill={info.color} opacity={0.9} />
-                                  <text x={cx} y={cy - 7} textAnchor="middle" fill="#94a3b8" fontSize="8">
-                                    {info.name}
-                                  </text>
-                                  <title>{`${info.name} · ${day.date}\n响应: ${formatDuration(entry.rt)}`}</title>
-                                </g>
-                              );
-                            })}
-                          </g>
-                        );
-                      })}
-                    </g>
-                  </svg>
-                </div>
-              </div>
-            </div>
-          );
-        })()}
-
-        {/* Empty state when no metrics data */}
-        {expanded && dailyBreakdown.days.length === 0 && (
-          <div className="px-5 pb-5 border-t border-white/[0.04]">
-            <div className="pt-4 text-center py-6 text-xs text-slate-600">暂无数据</div>
-          </div>
+        {/* Expanded detail — extracted to a memoized component so Overview's
+            15s poll does not re-render three SVG charts. */}
+        {expanded && (
+          <AgentsStatusBreakdown dailyBreakdown={dailyBreakdown} agentInfo={agentInfo} />
         )}
       </div>
 
@@ -636,8 +435,8 @@ export function Overview({ onViewAgent }: OverviewProps) {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {agents.map((agent, idx) => (
-            <AgentCard key={agent.id} agent={agent} idx={idx} onViewAgent={onViewAgent} />
+          {agents.map((agent) => (
+            <AgentCard key={agent.id} agent={agent} onViewAgent={onViewAgent} />
           ))}
         </div>
       </div>

@@ -90,9 +90,22 @@ async def main():
                 return
             print("\n" + "=" * 60)
             print("Please log in to DeepSeek in the opened Chrome window")
-            print("Press Enter when done...")
+            print("Detecting login automatically (max 2 min)...")
             print("=" * 60)
-            input()
+            # Don't block on input() — when this script is launched from the
+            # dashboard's background refresh, stdin isn't a TTY and input()
+            # would hang the subprocess forever. Poll the URL instead.
+            if sys.stdin.isatty():
+                try:
+                    input()
+                except (EOFError, KeyboardInterrupt):
+                    pass
+            else:
+                deadline = time.time() + 120
+                while time.time() < deadline:
+                    await page.wait_for_timeout(3000)
+                    if "usage" in page.url:
+                        break
             await page.wait_for_timeout(3000)
             if "usage" not in page.url:
                 await page.goto("https://platform.deepseek.com/usage", timeout=30000)

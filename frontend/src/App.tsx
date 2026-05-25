@@ -8,10 +8,17 @@ import { AgentDetail } from './components/AgentDetail';
 import { LogViewer } from './components/LogViewer';
 import { ActiveSessions } from './components/ActiveSessions';
 import { CollabPanel } from './components/CollabPanel';
+import type { Page } from './lib/types';
 
-type Page = 'overview' | 'cron' | 'skills' | 'models' | 'logs' | 'sessions' | 'collab';
-
-function PageContent({ page, onViewAgent }: { page: Page; onViewAgent: (id: string) => void }) {
+function PageContent({
+  page,
+  onViewAgent,
+  onNavigate,
+}: {
+  page: Page;
+  onViewAgent: (id: string) => void;
+  onNavigate: (p: Page) => void;
+}) {
   switch (page) {
     case 'overview':
       return <Overview key="overview" onViewAgent={onViewAgent} />;
@@ -26,7 +33,7 @@ function PageContent({ page, onViewAgent }: { page: Page; onViewAgent: (id: stri
     case 'sessions':
       return <ActiveSessions key="sessions" />;
     case 'collab':
-      return <CollabPanel key="collab" />;
+      return <CollabPanel key="collab" onNavigate={onNavigate} />;
   }
 }
 
@@ -46,22 +53,21 @@ export default function App() {
     setSelectedAgent(id);
   };
 
-  // Show agent detail page when an agent card is clicked from overview
-  if (selectedAgent) {
-    return (
-      <Layout page="overview" onPageChange={handlePageChange}>
+  // Agent detail is a sub-view: it overlays the current page but keeps the
+  // underlying `page` state so the sidebar highlight stays consistent with
+  // where the user came from. Clicking a sidebar entry calls
+  // handlePageChange which clears selectedAgent and switches the page.
+  return (
+    <Layout page={page} onPageChange={handlePageChange}>
+      {selectedAgent ? (
         <AgentDetail
           key={selectedAgent}
           agentId={selectedAgent}
           onBack={() => setSelectedAgent(null)}
         />
-      </Layout>
-    );
-  }
-
-  return (
-    <Layout page={page} onPageChange={handlePageChange}>
-      <PageContent page={page} onViewAgent={handleViewAgent} />
+      ) : (
+        <PageContent page={page} onViewAgent={handleViewAgent} onNavigate={handlePageChange} />
+      )}
     </Layout>
   );
 }

@@ -1,8 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Activity, Clock, Cpu, GitBranch, Layers, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Radio, Terminal } from 'lucide-react';
 import { cn } from '../lib/utils';
-
-type Page = 'overview' | 'cron' | 'skills' | 'models' | 'logs' | 'sessions' | 'collab';
+import type { Page } from '../lib/types';
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -22,6 +21,14 @@ const navItems: { id: Page; label: string; icon: React.ElementType }[] = [
 
 export function Layout({ children, page, onPageChange }: LayoutProps) {
   const [collapsed, setCollapsed] = useState(false);
+  // Tick the header clock every minute — the previous implementation
+  // computed `new Date()` once at mount and only updated when something
+  // else caused a Layout re-render, producing a stale, jittery clock.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const iv = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(iv);
+  }, []);
 
   return (
     <div className="flex h-screen bg-slate-950 text-slate-200 overflow-hidden">
@@ -107,7 +114,7 @@ export function Layout({ children, page, onPageChange }: LayoutProps) {
           </div>
           <div className="flex items-center gap-3">
             <span className="text-xs text-slate-500 font-mono">
-              {new Date().toLocaleString('zh-CN', {
+              {new Date(now).toLocaleString('zh-CN', {
                 month: 'short',
                 day: 'numeric',
                 weekday: 'short',

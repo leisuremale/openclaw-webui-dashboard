@@ -1,6 +1,7 @@
 import { cn } from '../lib/utils';
 import { History, X } from 'lucide-react';
 import type { VersionHistoryResp } from '../lib/types';
+import { ModalShell } from './ModalShell';
 
 const sourceMeta: Record<string, { label: string; tone: 'precise' | 'approx' | 'unknown'; tip: string }> = {
   'plugin-runtime-deps': {
@@ -50,14 +51,11 @@ interface VersionHistoryModalProps {
 
 export function VersionHistoryModal({ loading, data, onClose }: VersionHistoryModalProps) {
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-sm animate-in fade-in"
-      onClick={onClose}
+    <ModalShell
+      onClose={onClose}
+      labelledBy="version-history-title"
+      className="glass-card rounded-2xl w-full max-w-lg max-h-[85vh] flex flex-col shadow-2xl border border-white/[0.08]"
     >
-      <div
-        className="glass-card rounded-2xl w-full max-w-lg max-h-[85vh] flex flex-col shadow-2xl border border-white/[0.08]"
-        onClick={(e) => e.stopPropagation()}
-      >
         {/* Header */}
         <div className="flex items-center justify-between p-5 border-b border-white/[0.06]">
           <div className="flex items-center gap-3">
@@ -65,7 +63,7 @@ export function VersionHistoryModal({ loading, data, onClose }: VersionHistoryMo
               <History className="w-4 h-4 text-indigo-400" />
             </div>
             <div>
-              <div className="font-semibold text-slate-100 text-sm">Openclaw 升级历史</div>
+              <div id="version-history-title" className="font-semibold text-slate-100 text-sm">Openclaw 升级历史</div>
               <div className="text-[11px] text-slate-500">每次升级到的版本与时间</div>
             </div>
           </div>
@@ -171,7 +169,6 @@ export function VersionHistoryModal({ loading, data, onClose }: VersionHistoryMo
           </span>
           <span>共 {data?.history.length ?? 0} 条记录</span>
         </div>
-      </div>
-    </div>
+    </ModalShell>
   );
 }

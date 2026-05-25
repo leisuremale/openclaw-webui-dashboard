@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
-import { api, isAbort } from '../lib/api';
+import { useCallback, useState } from 'react';
+import { api } from '../lib/api';
+import { usePolling } from '../lib/usePolling';
 import { cn, formatDuration, formatTime } from '../lib/utils';
 import {
   GitBranch,
@@ -12,8 +13,13 @@ import {
   AlertTriangle,
   ArrowRight,
   ExternalLink,
+  AlertCircle,
 } from 'lucide-react';
-import type { CollabResponse, CollabTool, CollabTask } from '../lib/types';
+import type { CollabResponse, CollabTool, CollabTask, Page } from '../lib/types';
+
+// Subset used for the "查看会话" jump-out. Kept as a separate alias so future
+// nav targets can be restricted at the call site without expanding Page.
+type NavTarget = Page;
 
 const TOOL_ICONS: Record<string, React.ElementType> = {
   'claude-code': Terminal,
@@ -94,15 +100,14 @@ function ToolStatusCard({ tool, todayStats }: { tool: CollabTool; todayStats?: {
   );
 }
 
-function TaskCard({ task, idx }: { task: CollabTask; idx: number }) {
+function TaskCard({ task, onNavigate }: { task: CollabTask; onNavigate?: (p: NavTarget) => void }) {
   const isRunning = task.status === 'running';
   const isDone = task.status === 'done';
   const isFailed = task.status === 'failed' || task.status === 'error';
 
   return (
     <div
-      className="glass-card glass-card-hover rounded-xl p-4 animate-in fade-in"
-      style={{ animationDelay: `${idx * 50}ms` }}
+      className="glass-card glass-card-hover rounded-xl p-4"
     >
       <div className="flex items-start gap-3">
         {/* Status indicator */}
@@ -153,10 +158,14 @@ function TaskCard({ task, idx }: { task: CollabTask; idx: number }) {
             {task.model && (
               <span className="text-slate-600 font-mono">{task.model}</span>
             )}
-            <span className="ml-auto flex items-center gap-1 text-indigo-400 cursor-pointer hover:text-indigo-300 transition-colors">
+            <button
+              type="button"
+              onClick={() => onNavigate?.('sessions')}
+              className="ml-auto flex items-center gap-1 text-indigo-400 hover:text-indigo-300 transition-colors"
+            >
               <ExternalLink className="w-3 h-3" />
               查看会话
-            </span>
+            </button>
           </div>
         </div>
       </div>
@@ -164,36 +173,28 @@ function TaskCard({ task, idx }: { task: CollabTask; idx: number }) {
   );
 }
 
-export function CollabPanel() {
-  const [data, setData] = useState<CollabResponse | null>(null);
-  const [loading, setLoading] = useState(true);
+export function CollabPanel({ onNavigate }: { onNavigate?: (p: NavTarget) => void } = {}) {
   const [showHistory, setShowHistory] = useState(false);
 
-  useEffect(() => {
-    const ac = new AbortController();
-    let isFirst = true;
-    const load = () =>
-      api
-        .collab({ signal: ac.signal })
-        .then((d) => {
-          setData(d);
-          if (isFirst) {
-            setLoading(false);
-            isFirst = false;
-          }
-        })
-        .catch((err) => {
-          if (!isAbort(err)) console.warn('collab load failed:', err);
-        });
-    load();
-    const iv = setInterval(load, 10000);
-    return () => {
-      clearInterval(iv);
-      ac.abort();
-    };
-  }, []);
+  const collabFetcher = useCallback(
+    (signal: AbortSignal) => api.collab({ signal }),
+    [],
+  );
+  const { data, loading, error } = usePolling<CollabResponse>(collabFetcher, 10000);
 
-  if (loading || !data) return <LoadingSkeleton />;
+  if (loading) return <LoadingSkeleton />;
+
+  if (!data) {
+    return (
+      <div className="glass-card rounded-xl p-12 text-center">
+        <AlertCircle className="w-8 h-8 mx-auto mb-3 text-rose-400" />
+        <div className="text-slate-300 font-medium mb-1">协同调度数据加载失败</div>
+        <div className="text-xs text-slate-500 break-all">
+          {error || '请稍后重试或检查后端日志'}
+        </div>
+      </div>
+    );
+  }
 
   const { tools, activeTasks, todayStats, history } = data;
   const claudeTool = tools.find((t) => t.type === 'claude-code');
@@ -258,8 +259,8 @@ export function CollabPanel() {
           </div>
         ) : (
           <div className="space-y-2">
-            {activeTasks.map((task, idx) => (
-              <TaskCard key={task.sessionKey} task={task} idx={idx} />
+            {activeTasks.map((task) => (
+              <TaskCard key={task.sessionKey} task={task} onNavigate={onNavigate} />
             ))}
           </div>
         )}
@@ -284,8 +285,8 @@ export function CollabPanel() {
 
           {showHistory && (
             <div className="space-y-2">
-              {history.slice(0, 20).map((task, idx) => (
-                <TaskCard key={task.sessionKey} task={task} idx={idx} />
+              {history.slice(0, 20).map((task) => (
+                <TaskCard key={task.sessionKey} task={task} onNavigate={onNavigate} />
               ))}
               {history.length > 20 && (
                 <div className="text-center text-xs text-slate-500 py-2">

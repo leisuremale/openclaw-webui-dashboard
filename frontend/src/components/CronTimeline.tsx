@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, isAbort } from '../lib/api';
+import { usePolling } from '../lib/usePolling';
 import { cn, formatDuration, formatTime } from '../lib/utils';
 import { Clock, CheckCircle2, XCircle, AlertTriangle, Calendar, Search, Filter } from 'lucide-react';
 import type { Agent, CronJob } from '../lib/types';
@@ -7,33 +8,27 @@ import type { Agent, CronJob } from '../lib/types';
 type AgentLite = Pick<Agent, 'id' | '_displayName'>;
 
 export function CronTimeline() {
-  const [jobs, setJobs] = useState<CronJob[]>([]);
   const [agents, setAgents] = useState<AgentLite[]>([]);
   const [filter, setFilter] = useState<string | 'all'>('all');
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<string | 'all'>('all');
 
+  const cronFetcher = useCallback(
+    (signal: AbortSignal) => api.cron({ signal }),
+    [],
+  );
+  const { data: jobsData } = usePolling<CronJob[]>(cronFetcher, 30000);
+  const jobs = useMemo(() => jobsData ?? [], [jobsData]);
+
   useEffect(() => {
     const ac = new AbortController();
-    const loadCron = () =>
-      api
-        .cron({ signal: ac.signal })
-        .then(setJobs)
-        .catch((err) => {
-          if (!isAbort(err)) console.warn('cron load failed:', err);
-        });
-    loadCron();
     api
       .agents({ signal: ac.signal })
-      .then((ags: AgentLite[]) => setAgents(ags))
+      .then((ags) => setAgents(ags))
       .catch((err) => {
         if (!isAbort(err)) console.warn('agents load failed:', err);
       });
-    const iv = setInterval(loadCron, 30000);
-    return () => {
-      clearInterval(iv);
-      ac.abort();
-    };
+    return () => ac.abort();
   }, []);
 
   const agentNameMap = useMemo(() => {
@@ -57,12 +52,6 @@ export function CronTimeline() {
     }
     return result;
   }, [jobs, filter, statusFilter, search, agentNameMap]);
-
-  const statusIcon = (status: string) => {
-    if (status === 'ok') return <CheckCircle2 className="w-4 h-4 text-emerald-400" />;
-    if (status === 'error') return <XCircle className="w-4 h-4 text-rose-400" />;
-    return <AlertTriangle className="w-4 h-4 text-slate-500" />;
-  };
 
   const okCount = jobs.filter((j) => j.lastStatus === 'ok').length;
   const errCount = jobs.filter((j) => j.lastStatus === 'error').length;
@@ -152,7 +141,7 @@ export function CronTimeline() {
       </div>
 
       {/* Table */}
-      <div className="glass-card rounded-xl overflow-hidden animate-in fade-in">
+      <div className="glass-card rounded-xl overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
@@ -176,72 +165,11 @@ export function CronTimeline() {
                 </tr>
               ) : (
                 filtered.map((job) => (
-                  <tr key={job.id} className="hover:bg-white/[0.02] transition-colors group">
-                    <td className="py-3 px-4">
-                      <div className="flex items-center gap-2">
-                        {statusIcon(job.lastStatus)}
-                        {!job.enabled && (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-700/50 text-slate-400">禁用</span>
-                        )}
-                        {job.consecutiveErrors > 1 && (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-rose-500/10 text-rose-400 border border-rose-500/20">
-                            ×{job.consecutiveErrors}
-                          </span>
-                        )}
-                      </div>
-                    </td>
-                    <td className="py-3 px-4">
-                      <div className="font-medium text-slate-200 text-[13px]">{job.name}</div>
-                      {job.description && (
-                        <div className="text-[11px] text-slate-500 mt-0.5 max-w-xs truncate">{job.description}</div>
-                      )}
-                      {job.lastError && job.lastStatus === 'error' && (
-                        <div className="text-[11px] text-rose-400/80 mt-0.5 max-w-xs truncate" title={job.lastError}>
-                          {job.lastError}
-                        </div>
-                      )}
-                    </td>
-                    <td className="py-3 px-4">
-                      <span className="text-[11px] text-slate-400 bg-white/[0.04] px-2 py-1 rounded">
-                        {agentNameMap[job.agentId] || job.agentId}
-                      </span>
-                    </td>
-                    <td className="py-3 px-4">
-                      <div className="flex items-center gap-1.5 text-[12px] text-slate-300">
-                        <Calendar className="w-3 h-3 text-slate-500 flex-shrink-0" />
-                        <span>{job.scheduleDisplay || job.schedule}</span>
-                        {job.scheduleDisplay && job.schedule !== job.scheduleDisplay && (
-                          <code
-                            className="text-[10px] text-slate-600 cursor-help"
-                            title={`Cron: ${job.schedule}`}
-                          >
-                            ({job.schedule})
-                          </code>
-                        )}
-                      </div>
-                    </td>
-                    <td className="py-3 px-4 text-[12px] text-slate-400">
-                      {formatTime(job.lastRunAtMs)}
-                    </td>
-                    <td className="py-3 px-4 text-[12px] text-slate-400">
-                      {job.lastDurationMs ? (
-                        <span className={cn(
-                          'font-mono',
-                          job.lastDurationMs > 60000 ? 'text-amber-400' : 'text-slate-400'
-                        )}>
-                          {formatDuration(job.lastDurationMs)}
-                        </span>
-                      ) : (
-                        <span className="text-slate-600">-</span>
-                      )}
-                    </td>
-                    <td className="py-3 px-4 text-[12px] text-slate-400">
-                      <div className="flex items-center gap-1.5">
-                        <Clock className="w-3 h-3 text-indigo-400 flex-shrink-0" />
-                        {formatTime(job.nextRunAtMs)}
-                      </div>
-                    </td>
-                  </tr>
+                  <CronRow
+                    key={job.id}
+                    job={job}
+                    agentName={agentNameMap[job.agentId] || job.agentId}
+                  />
                 ))
               )}
             </tbody>
@@ -249,5 +177,77 @@ export function CronTimeline() {
         </div>
       </div>
     </div>
+  );
+}
+
+function statusIcon(status: string) {
+  if (status === 'ok') return <CheckCircle2 className="w-4 h-4 text-emerald-400" />;
+  if (status === 'error') return <XCircle className="w-4 h-4 text-rose-400" />;
+  return <AlertTriangle className="w-4 h-4 text-slate-500" />;
+}
+
+function CronRow({ job, agentName }: { job: CronJob; agentName: string }) {
+  return (
+    <tr className="hover:bg-white/[0.02] transition-colors group">
+      <td className="py-3 px-4">
+        <div className="flex items-center gap-2">
+          {statusIcon(job.lastStatus)}
+          {!job.enabled && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-700/50 text-slate-400">禁用</span>
+          )}
+          {job.consecutiveErrors > 1 && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-rose-500/10 text-rose-400 border border-rose-500/20">
+              ×{job.consecutiveErrors}
+            </span>
+          )}
+        </div>
+      </td>
+      <td className="py-3 px-4">
+        <div className="font-medium text-slate-200 text-[13px]">{job.name}</div>
+        {job.description && (
+          <div className="text-[11px] text-slate-500 mt-0.5 max-w-xs truncate">{job.description}</div>
+        )}
+        {job.lastError && job.lastStatus === 'error' && (
+          <div className="text-[11px] text-rose-400/80 mt-0.5 max-w-xs truncate" title={job.lastError}>
+            {job.lastError}
+          </div>
+        )}
+      </td>
+      <td className="py-3 px-4">
+        <span className="text-[11px] text-slate-400 bg-white/[0.04] px-2 py-1 rounded">{agentName}</span>
+      </td>
+      <td className="py-3 px-4">
+        <div className="flex items-center gap-1.5 text-[12px] text-slate-300">
+          <Calendar className="w-3 h-3 text-slate-500 flex-shrink-0" />
+          <span>{job.scheduleDisplay || job.schedule}</span>
+          {job.scheduleDisplay && job.schedule !== job.scheduleDisplay && (
+            <code className="text-[10px] text-slate-600 cursor-help" title={`Cron: ${job.schedule}`}>
+              ({job.schedule})
+            </code>
+          )}
+        </div>
+      </td>
+      <td className="py-3 px-4 text-[12px] text-slate-400">{formatTime(job.lastRunAtMs)}</td>
+      <td className="py-3 px-4 text-[12px] text-slate-400">
+        {job.lastDurationMs ? (
+          <span
+            className={cn(
+              'font-mono',
+              job.lastDurationMs > 60000 ? 'text-amber-400' : 'text-slate-400',
+            )}
+          >
+            {formatDuration(job.lastDurationMs)}
+          </span>
+        ) : (
+          <span className="text-slate-600">-</span>
+        )}
+      </td>
+      <td className="py-3 px-4 text-[12px] text-slate-400">
+        <div className="flex items-center gap-1.5">
+          <Clock className="w-3 h-3 text-indigo-400 flex-shrink-0" />
+          {formatTime(job.nextRunAtMs)}
+        </div>
+      </td>
+    </tr>
   );
 }
