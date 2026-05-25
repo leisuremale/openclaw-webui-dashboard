@@ -1,41 +1,11 @@
 import { useEffect, useState } from 'react';
 import { api, isAbort } from '../lib/api';
-import { cn } from '../lib/utils';
+import { cn, formatCount } from '../lib/utils';
 import { Cpu, Globe, Zap, ExternalLink, RefreshCw, TrendingUp, AlertTriangle } from 'lucide-react';
+import type { Agent, ModelUsage, ProviderInfo } from '../lib/types';
 
-interface ModelInfo {
-  id: string;
-  name: string;
-  contextWindow?: number;
-}
-
-interface ProviderInfo {
-  provider: string;
-  baseUrl: string;
-  models: ModelInfo[];
-}
-
-interface AgentLite {
-  id: string;
-  _displayName: string;
-  _model_display: string;
-  _provider: string;
-}
-
-interface UsageInfo {
-  plan?: string;
-  quota_calls?: number;
-  quota_hours?: number;
-  used_percent?: number;
-  total_credit?: number;
-  balance?: number;
-  voice_used_percent?: number;
-  updated_at?: number;
-  error?: string | null;
-  page_percents_found?: number[];
-}
-
-type ModelUsage = Record<string, UsageInfo>;
+// Just the agent fields ModelsPage needs.
+type AgentLite = Pick<Agent, 'id' | '_displayName' | '_model_display' | '_provider'>;
 
 const providerMeta: Record<string, { color: string; label: string }> = {
   minimax: { color: 'from-emerald-500/20 to-teal-500/20 border-emerald-500/25 text-emerald-300', label: 'Minimax' },
@@ -45,13 +15,6 @@ const providerMeta: Record<string, { color: string; label: string }> = {
   volcengine: { color: 'from-rose-500/20 to-pink-500/20 border-rose-500/25 text-rose-300', label: '火山引擎' },
   'volcengine-plan': { color: 'from-rose-500/20 to-pink-500/20 border-rose-500/25 text-rose-300', label: '火山 Plan' },
 };
-
-function formatContextWindow(k?: number): string {
-  if (!k) return '—';
-  if (k >= 1000_000) return `${(k / 1000_000).toFixed(0)}M`;
-  if (k >= 1000) return `${(k / 1000).toFixed(0)}K`;
-  return `${k}`;
-}
 
 function fetchModels(signal?: AbortSignal): Promise<ProviderInfo[]> {
   return api.models({ signal });
@@ -98,12 +61,34 @@ export function ModelsPage() {
   const refreshUsage = async (provider: string) => {
     setRefreshing(provider);
     try {
-      await api.refreshUsage(provider);
-      // Reload usage data after refresh
-      const usage = await api.modelUsage();
-      setModelUsage(usage || {});
-    } catch {
-      // silent
+      const start = await api.refreshUsage(provider);
+      // Rate-limited / already-running cases come back as ok:false with a
+      // message — surface to console for now, finish UI spinner.
+      if (!start.ok && start.error) {
+        console.warn('refresh rejected:', start.error);
+        setRefreshing(null);
+        return;
+      }
+      // Poll status until the background job finishes (or 3 min hard stop).
+      const deadline = Date.now() + 3 * 60_000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2000));
+        try {
+          const status = await api.refreshUsageStatus(provider);
+          if (!status.running) break;
+        } catch (err) {
+          console.warn('refresh status failed:', err);
+          break;
+        }
+      }
+      try {
+        const usage = await api.modelUsage();
+        setModelUsage(usage || {});
+      } catch (err) {
+        console.warn('reload modelUsage failed:', err);
+      }
+    } catch (err) {
+      console.warn('refreshUsage failed:', err);
     } finally {
       setRefreshing(null);
     }
@@ -317,7 +302,7 @@ export function ModelsPage() {
                           <div className="text-[10px] text-slate-500 font-mono">{m.id}</div>
                         </td>
                         <td className="py-2 px-1 text-right text-xs text-slate-400 font-mono">
-                          {formatContextWindow(m.contextWindow)}
+                          {formatCount(m.contextWindow)}
                         </td>
                       </tr>
                     ))}

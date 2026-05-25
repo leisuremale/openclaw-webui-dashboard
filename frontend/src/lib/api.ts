@@ -1,35 +1,74 @@
-// 生产模式走相对路径（前后端同源），开发模式走 Vite proxy
-const API_BASE = import.meta.env.PROD ? '' : '';
+import type {
+  ActiveSession,
+  Agent,
+  AgentMetricSummary,
+  AgentMetricsResponse,
+  CollabResponse,
+  CronJob,
+  LogAnalysis,
+  LogsResponse,
+  ModelUsage,
+  OkResponse,
+  OverviewResponse,
+  ProviderInfo,
+  Skill,
+  VersionHistoryResp,
+  VersionInfo,
+} from './types';
 
-async function fetchJson(path: string, init?: RequestInit) {
+// Both dev (Vite proxy) and prod (FastAPI same-origin) use relative paths;
+// no base URL needed. Keep this constant so callers can build absolute URLs
+// (e.g. <a href={...}>) if needed in the future.
+export const API_BASE = '';
+
+async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, init);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const body = (await res.json()) as { detail?: string };
+      if (body && typeof body.detail === 'string') detail = `: ${body.detail}`;
+    } catch {
+      // ignore; body not JSON
+    }
+    throw new Error(`HTTP ${res.status}${detail}`);
+  }
+  return (await res.json()) as T;
 }
 
 export const api = {
-  overview: (init?: RequestInit) => fetchJson('/api/overview', init),
-  agents: (init?: RequestInit) => fetchJson('/api/agents', init),
-  agentsMetrics: (init?: RequestInit) => fetchJson('/api/agents/metrics', init),
-  cron: (init?: RequestInit) => fetchJson('/api/cron', init),
+  overview: (init?: RequestInit) => fetchJson<OverviewResponse>('/api/overview', init),
+  agents: (init?: RequestInit) => fetchJson<Agent[]>('/api/agents', init),
+  agentsMetrics: (init?: RequestInit) =>
+    fetchJson<AgentMetricSummary[]>('/api/agents/metrics', init),
+  cron: (init?: RequestInit) => fetchJson<CronJob[]>('/api/cron', init),
   skills: (agentId: string, init?: RequestInit) =>
-    fetchJson(`/api/skills/${agentId}`, init),
+    fetchJson<Skill[]>(`/api/skills/${agentId}`, init),
   agentMetrics: (agentId: string, init?: RequestInit) =>
-    fetchJson(`/api/agents/${agentId}/metrics`, init),
-  models: (init?: RequestInit) => fetchJson('/api/models', init),
-  modelUsage: (init?: RequestInit) => fetchJson('/api/models/usage', init),
+    fetchJson<AgentMetricsResponse>(`/api/agents/${agentId}/metrics`, init),
+  models: (init?: RequestInit) => fetchJson<ProviderInfo[]>('/api/models', init),
+  modelUsage: (init?: RequestInit) => fetchJson<ModelUsage>('/api/models/usage', init),
   refreshUsage: (provider: string, init?: RequestInit) =>
-    fetch(`${API_BASE}/api/models/usage/refresh/${provider}`, {
+    fetchJson<OkResponse>(`/api/models/usage/refresh/${provider}`, {
       method: 'POST',
       ...init,
-    }).then((r) => r.json()),
-  sessions: (init?: RequestInit) => fetchJson('/api/sessions/active', init),
+    }),
+  refreshUsageStatus: (provider: string, init?: RequestInit) =>
+    fetchJson<{ running: boolean; started_at: number; ended_at: number; ok: boolean; output?: string; error?: string }>(
+      `/api/models/usage/refresh/${provider}/status`,
+      init,
+    ),
+  sessions: (init?: RequestInit) =>
+    fetchJson<ActiveSession[]>('/api/sessions/active', init),
   logs: (type: 'stdout' | 'stderr', init?: RequestInit) =>
-    fetchJson(`/api/logs/${type}?lines=500`, init),
-  logAnalysis: (init?: RequestInit) => fetchJson('/api/logs/analysis', init),
-  collab: (init?: RequestInit) => fetchJson('/api/collab/status', init),
-  version: (init?: RequestInit) => fetchJson('/api/version', init),
-  versionHistory: (init?: RequestInit) => fetchJson('/api/version/history', init),
+    fetchJson<LogsResponse>(`/api/logs/${type}?lines=500`, init),
+  logAnalysis: (init?: RequestInit) => fetchJson<LogAnalysis>('/api/logs/analysis', init),
+  collab: (init?: RequestInit) => fetchJson<CollabResponse>('/api/collab/status', init),
+  version: (init?: RequestInit) => fetchJson<VersionInfo>('/api/version', init),
+  versionHistory: (init?: RequestInit) =>
+    fetchJson<VersionHistoryResp>('/api/version/history', init),
+  openPath: (path: string, init?: RequestInit) =>
+    fetchJson<OkResponse>(`/api/open-path?path=${encodeURIComponent(path)}`, init),
 };
 
 export function isAbort(err: unknown): boolean {

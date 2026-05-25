@@ -1,8 +1,15 @@
 import json
 import logging
 import os
+import re
+import stat
+import subprocess
+import sys
+import threading
 import time
-from datetime import datetime, timezone
+import urllib.parse
+import urllib.request
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from .helpers import (
@@ -13,7 +20,7 @@ from .helpers import (
     _cron_to_human,
     _extract_skill_info,
     _parse_skills_readme,
-    _parse_yaml_frontmatter,
+    tail_lines,
 )
 
 logger = logging.getLogger(__name__)
@@ -27,12 +34,23 @@ class OpenclawService:
         self.cron_state_path = os.path.join(OPENCLAW_ROOT, "cron", "jobs-state.json")
     
     def _read_json(self, path: str) -> Optional[dict]:
+        """Read JSON file; return None on any failure.
+
+        Missing file is logged at DEBUG (expected during first-time setup).
+        Other failures (permission denied, malformed JSON) log at WARNING so
+        operators can tell from logs that the dashboard saw a real problem
+        but degraded gracefully.
+        """
         try:
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except FileNotFoundError:
+            logger.debug("JSON not found: %s", path)
             return None
-        except (OSError, json.JSONDecodeError) as e:
+        except json.JSONDecodeError as e:
+            logger.warning("Corrupted JSON %s: %s", path, e)
+            return None
+        except OSError as e:
             logger.warning("Failed to read JSON %s: %s", path, e)
             return None
     
@@ -83,7 +101,9 @@ class OpenclawService:
             aid = agent.get("id", "main")
             stats = agent_cron_map.get(aid, {"total": 0, "ok": 0, "error": 0})
             agent["_cron_stats"] = stats
-            agent["_skills_count"] = len(self.get_skills_for_agent(aid, agent.get("workspace")))
+            # Use the cheap counter — full parse happens lazily when the
+            # user actually opens /skills/{agent_id}.
+            agent["_skills_count"] = self.count_skills_for_agent(aid, agent.get("workspace"))
 
             agent_jobs = [j for j in cron_jobs if j["agentId"] == aid]
             recent_errors = [j for j in agent_jobs if j["lastStatus"] == "error" and (j.get("lastRunAtMs") or 0) >= today_start]
@@ -157,10 +177,12 @@ class OpenclawService:
                     time_str = f"every {minutes}m"
                     schedule_display = f"每 {minutes} 分钟"
             
-            # Status
-            last_status = state.get("state", {}).get("lastRunStatus", "unknown")
-            consecutive_errors = state.get("state", {}).get("consecutiveErrors", 0)
-            
+            # State block — pulled out so we don't `state.get("state", {})`
+            # eight times in a row (one per field).
+            s = state.get("state", {}) if isinstance(state, dict) else {}
+            last_status = s.get("lastRunStatus", "unknown")
+            consecutive_errors = s.get("consecutiveErrors", 0)
+
             jobs.append({
                 "id": job_id,
                 "agentId": job.get("agentId", "main"),
@@ -170,28 +192,55 @@ class OpenclawService:
                 "schedule": time_str,
                 "scheduleDisplay": schedule_display,
                 "scheduleKind": schedule.get("kind"),
-                "nextRunAtMs": state.get("state", {}).get("nextRunAtMs"),
-                "lastRunAtMs": state.get("state", {}).get("lastRunAtMs"),
+                "nextRunAtMs": s.get("nextRunAtMs"),
+                "lastRunAtMs": s.get("lastRunAtMs"),
                 "lastStatus": last_status,
                 "consecutiveErrors": consecutive_errors,
-                "lastError": state.get("state", {}).get("lastError", ""),
-                "lastDurationMs": state.get("state", {}).get("lastDurationMs", 0),
+                "lastError": s.get("lastError", ""),
+                "lastDurationMs": s.get("lastDurationMs", 0),
             })
         return jobs
     
     def open_path(self, path: str) -> dict:
-        import stat as stat_mod
-        import subprocess
-        import urllib.parse
-
         decoded = urllib.parse.unquote(path)
-        real = os.path.realpath(decoded)
+        # Lexical absolute path — does NOT resolve symlinks. We need both this
+        # and the resolved realpath to (a) walk components for symlink checks
+        # and (b) verify the final target stays within OPENCLAW_ROOT.
+        abs_lexical = os.path.abspath(os.path.expanduser(decoded))
+        root_real = os.path.realpath(OPENCLAW_ROOT)
+
+        # Lexical containment check (catches "..") against the resolved root.
+        try:
+            rel = os.path.relpath(abs_lexical, root_real)
+        except ValueError:
+            return {"ok": False, "error": "Path outside openclaw root"}
+        if rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel):
+            return {"ok": False, "error": "Path outside openclaw root"}
+
+        # Walk each path component below root_real and lstat it. Reject any
+        # symlink — this is the guarantee the README advertises and the
+        # previous implementation accidentally disabled by realpath'ing first.
+        cur = root_real
+        for part in rel.split(os.sep):
+            if part in ("", "."):
+                continue
+            cur = os.path.join(cur, part)
+            try:
+                link_st = os.lstat(cur)
+            except OSError as e:
+                return {"ok": False, "error": str(e)}
+            if stat.S_ISLNK(link_st.st_mode):
+                return {"ok": False, "error": "Symlinks not permitted in path"}
+
+        # No symlinks were involved; abs_lexical IS the real path now.
+        real = abs_lexical
         if not os.path.exists(real):
             return {"ok": False, "error": "Path does not exist"}
 
-        root = os.path.realpath(OPENCLAW_ROOT)
+        # Final containment check on the resolved target. Belt + suspenders
+        # in case the lexical walk missed a case-sensitivity edge.
         try:
-            if os.path.commonpath([real, root]) != root:
+            if os.path.commonpath([os.path.realpath(real), root_real]) != root_real:
                 return {"ok": False, "error": "Path outside openclaw root"}
         except ValueError:
             return {"ok": False, "error": "Path outside openclaw root"}
@@ -202,51 +251,56 @@ class OpenclawService:
             return {"ok": False, "error": str(e)}
 
         mode = st.st_mode
-        if stat_mod.S_ISLNK(mode):
-            return {"ok": False, "error": "Symlinks not permitted"}
-        is_dir = stat_mod.S_ISDIR(mode)
-        is_file = stat_mod.S_ISREG(mode)
+        is_dir = stat.S_ISDIR(mode)
+        is_file = stat.S_ISREG(mode)
         if not (is_dir or is_file):
             return {"ok": False, "error": "Only regular files or directories allowed"}
-        # Refuse executables / .app bundles (macOS treats these as launchable).
-        exec_bits = stat_mod.S_IXUSR | stat_mod.S_IXGRP | stat_mod.S_IXOTH
-        if is_file and (mode & exec_bits):
-            return {"ok": False, "error": "Executable files not permitted"}
-        if real.endswith(".app") or real.endswith(".app/"):
+        # Refuse executables / launchable bundles per-platform.
+        if is_file:
+            if sys.platform == "win32":
+                # Windows mode bits are not meaningful — use extension blocklist.
+                lower = real.lower()
+                bad_exts = (".exe", ".bat", ".cmd", ".ps1", ".com", ".scr", ".msi", ".lnk", ".vbs", ".js")
+                if lower.endswith(bad_exts):
+                    return {"ok": False, "error": "Executable files not permitted"}
+            else:
+                exec_bits = stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+                if mode & exec_bits:
+                    return {"ok": False, "error": "Executable files not permitted"}
+        if real.endswith(".app") or real.endswith(".app" + os.sep):
             return {"ok": False, "error": ".app bundles not permitted"}
 
-        # Files: reveal in Finder (-R) instead of launching.
-        # Directories: open the folder.
-        argv = ["open", real] if is_dir else ["open", "-R", real]
+        # Reveal in OS file manager.
+        if sys.platform == "darwin":
+            argv = ["open", real] if is_dir else ["open", "-R", real]
+        elif sys.platform == "win32":
+            # explorer.exe /select,<file> reveals; <dir> opens. /select needs
+            # a real backslash path; abspath above already gave us one.
+            argv = ["explorer.exe", real] if is_dir else ["explorer.exe", f"/select,{real}"]
+        else:
+            # Linux: xdg-open opens; no portable "reveal" — open parent dir.
+            argv = ["xdg-open", real if is_dir else os.path.dirname(real)]
         try:
-            subprocess.run(argv, check=True, timeout=5)
+            # explorer.exe exits non-zero even on success; tolerate that.
+            subprocess.run(argv, check=(sys.platform != "win32"), timeout=5)
             return {"ok": True, "path": real}
+        except FileNotFoundError:
+            return {"ok": False, "error": f"OS file manager not available ({argv[0]})"}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
     def get_logs(self, log_type: str, lines: int = 200) -> dict:
-        import subprocess
         log_dir = os.path.join(os.path.dirname(__file__), "../../../logs")
         log_file = os.path.join(log_dir, f"{log_type}.log")
         if not os.path.exists(log_file):
             return {"lines": [], "error": f"Log file not found: {log_type}.log"}
-
-        try:
-            result = subprocess.run(
-                ["tail", "-n", str(lines), log_file],
-                capture_output=True, text=True, timeout=5
-            )
-            return {
-                "lines": result.stdout.strip().split("\n") if result.stdout.strip() else [],
-                "path": log_file,
-            }
-        except Exception as e:
-            return {"lines": [], "error": str(e)}
+        return {
+            "lines": tail_lines(log_file, n=lines),
+            "path": log_file,
+        }
 
     def get_log_analysis(self, lines: int = 500) -> dict:
         """Analyze dashboard + gateway logs and return structured insights."""
-        import re
-        import subprocess
         from collections import Counter
 
         all_lines = []
@@ -257,34 +311,24 @@ class OpenclawService:
             log_dir = os.path.join(os.path.dirname(__file__), "../../../logs")
             log_file = os.path.join(log_dir, f"{log_type}.log")
             if os.path.exists(log_file):
-                try:
-                    result = subprocess.run(
-                        ["tail", "-n", str(lines), log_file],
-                        capture_output=True, text=True, timeout=5
-                    )
-                    for line in result.stdout.strip().split("\n"):
+                tail = tail_lines(log_file, n=lines)
+                if tail:
+                    for line in tail:
                         if line.strip():
                             all_lines.append(("dashboard", line))
                     sources_ok.append(f"dashboard/{log_type}")
-                except Exception:
-                    pass
 
         # Read gateway logs
         gateway_log_dir = os.path.expanduser("~/.openclaw/logs")
         for log_name in ["gateway.err.log", "gateway.out.log"]:
             log_file = os.path.join(gateway_log_dir, log_name)
             if os.path.exists(log_file):
-                try:
-                    result = subprocess.run(
-                        ["tail", "-n", str(lines), log_file],
-                        capture_output=True, text=True, timeout=5
-                    )
-                    for line in result.stdout.strip().split("\n"):
+                tail = tail_lines(log_file, n=lines)
+                if tail:
+                    for line in tail:
                         if line.strip():
                             all_lines.append(("gateway", line))
                     sources_ok.append(f"gateway/{log_name}")
-                except Exception:
-                    pass
 
         if not all_lines:
             return {"insights": [], "stats": {}, "sources": []}
@@ -415,22 +459,76 @@ class OpenclawService:
             })
         return result
 
+    def _skill_dirs_for_agent(self, agent_id: str, workspace: Optional[str]) -> list[str]:
+        """Return existing skill base directories for an agent.
+
+        Shared by `get_skills_for_agent` (full parse) and the cheap counter
+        below so both stay in sync with the discovery rules.
+        """
+        dirs: list[str] = []
+        agent_skill_dir = os.path.join(OPENCLAW_ROOT, "agents", agent_id, "agent", "skills")
+        if os.path.exists(agent_skill_dir):
+            dirs.append(agent_skill_dir)
+        if workspace:
+            ws = os.path.join(workspace, "skills")
+            if os.path.exists(ws):
+                dirs.append(ws)
+        else:
+            ws = os.path.join(OPENCLAW_ROOT, f"workspace-{agent_id}", "skills")
+            if os.path.exists(ws):
+                dirs.append(ws)
+            elif agent_id == "main":
+                default_ws = os.path.join(OPENCLAW_ROOT, "workspace", "skills")
+                if os.path.exists(default_ws):
+                    dirs.append(default_ws)
+        return dirs
+
+    def count_skills_for_agent(self, agent_id: str, workspace: Optional[str] = None) -> int:
+        """Cheap count of skills for an agent — no YAML parsing, no README
+        reading. Used by `/api/overview` and `/api/agents` where the full
+        skill list is wasteful (only a count is rendered).
+
+        Walks the same directory rules as `get_skills_for_agent` but only
+        does `os.listdir` + name filtering. Counts unique skill names so the
+        result matches the full parser's dedup behaviour.
+        """
+        seen: set[str] = set()
+        for base_dir in self._skill_dirs_for_agent(agent_id, workspace):
+            try:
+                entries = os.listdir(base_dir)
+            except OSError:
+                continue
+            for entry in entries:
+                entry_path = os.path.join(base_dir, entry)
+                if not os.path.isdir(entry_path):
+                    continue
+                if entry == "references" or entry.startswith(".") or entry.startswith("_"):
+                    continue
+                if entry == "Nuwa Skills":
+                    try:
+                        for sub_entry in os.listdir(entry_path):
+                            if os.path.isdir(os.path.join(entry_path, sub_entry)):
+                                seen.add(sub_entry)
+                    except OSError:
+                        pass
+                    continue
+                seen.add(entry)
+        return len(seen)
+
     def get_skills_for_agent(self, agent_id: str, workspace: Optional[str] = None) -> list[dict]:
         skills = []
-        paths_to_scan = []
 
-        # Agent bundled skills
+        # Tag each base dir with whether it's agent-bundled or workspace —
+        # required for dedup priority below. Mirrors _skill_dirs_for_agent.
+        paths_to_scan: list[tuple[str, str]] = []
         agent_skill_dir = os.path.join(OPENCLAW_ROOT, "agents", agent_id, "agent", "skills")
         if os.path.exists(agent_skill_dir):
             paths_to_scan.append(("agent", agent_skill_dir))
-
-        # Workspace skills
         if workspace:
             ws_skill_dir = os.path.join(workspace, "skills")
             if os.path.exists(ws_skill_dir):
                 paths_to_scan.append(("workspace", ws_skill_dir))
         else:
-            # Try workspace-{agent_id} first, then fallback to plain "workspace" for main agent
             ws_skill_dir = os.path.join(OPENCLAW_ROOT, f"workspace-{agent_id}", "skills")
             if os.path.exists(ws_skill_dir):
                 paths_to_scan.append(("workspace", ws_skill_dir))
@@ -451,7 +549,13 @@ class OpenclawService:
             if os.path.exists(parent_readme):
                 readme_table = _parse_skills_readme(parent_readme)
 
-            for entry in os.listdir(base_dir):
+            try:
+                entries = os.listdir(base_dir)
+            except OSError as e:
+                logger.warning("listdir %s failed: %s", base_dir, e)
+                continue
+
+            for entry in entries:
                 entry_path = os.path.join(base_dir, entry)
                 if not os.path.isdir(entry_path):
                     continue
@@ -460,7 +564,12 @@ class OpenclawService:
 
                 # "Nuwa Skills" is a meta-directory containing more skills
                 if entry == "Nuwa Skills":
-                    for sub_entry in os.listdir(entry_path):
+                    try:
+                        sub_entries = os.listdir(entry_path)
+                    except OSError as e:
+                        logger.warning("listdir %s failed: %s", entry_path, e)
+                        continue
+                    for sub_entry in sub_entries:
                         sub_path = os.path.join(entry_path, sub_entry)
                         if os.path.isdir(sub_path):
                             skill = _extract_skill_info(sub_entry, "workspace", sub_path, readme_table)
@@ -499,8 +608,6 @@ class OpenclawService:
           rank 3: current version (from package.json mtime)
           rank 2: archive/openclaw-json-backups/openclaw.json.backup-YYYY.M.DD filename + mtime
         """
-        import re
-
         # version -> {version, installedAtMs, source, rank}
         entries: dict[str, dict] = {}
 
@@ -524,7 +631,12 @@ class OpenclawService:
         ]:
             if not os.path.isdir(backup_dir):
                 continue
-            for fn in os.listdir(backup_dir):
+            try:
+                backup_entries = os.listdir(backup_dir)
+            except OSError as e:
+                logger.warning("listdir %s failed: %s", backup_dir, e)
+                continue
+            for fn in backup_entries:
                 m = date_re.match(fn)
                 if not m:
                     continue
@@ -542,7 +654,12 @@ class OpenclawService:
         # --- rank 4: plugin-runtime-deps (precise install moment) ---
         deps_dir = os.path.join(OPENCLAW_ROOT, "plugin-runtime-deps")
         if os.path.isdir(deps_dir):
-            for entry in os.listdir(deps_dir):
+            try:
+                deps_entries = os.listdir(deps_dir)
+            except OSError as e:
+                logger.warning("listdir %s failed: %s", deps_dir, e)
+                deps_entries = []
+            for entry in deps_entries:
                 m = re.match(r"^openclaw-([0-9]+\.[0-9]+\.[0-9]+(?:[\-\+\.][0-9A-Za-z\.]+)?)-([0-9a-f]+)$", entry)
                 if not m:
                     continue
@@ -620,19 +737,28 @@ class OpenclawService:
             "history": records,
         }
 
+    # Single-flight guard for the npm refresh thread. Previously, every
+    # call to _check_latest_version (potentially several concurrent in-flight
+    # requests with a stale cache) spawned its own thread and raced on the
+    # same update-check.json file. Now a class-level flag + lock coalesces
+    # the work into one outstanding refresh.
+    _NPM_REFRESH_INFLIGHT = False
+    _NPM_REFRESH_LOCK = None
+
+    def _npm_refresh_lock(self):
+        if OpenclawService._NPM_REFRESH_LOCK is None:
+            OpenclawService._NPM_REFRESH_LOCK = threading.Lock()
+        return OpenclawService._NPM_REFRESH_LOCK
+
     def _check_latest_version(self) -> Optional[dict]:
         """Check npm registry for the latest openclaw version, with 6h cache.
 
         Non-blocking: always returns cached data immediately. If cache is
-        stale, triggers a background thread to refresh it for next call.
+        stale, triggers a single background thread to refresh it for next
+        call — concurrent callers all share that one thread.
 
         Returns {"version": str, "checkedAt": iso-str} or None.
         """
-        import threading
-        import urllib.request
-        import urllib.error
-        from datetime import datetime, timezone
-
         update_check_path = os.path.join(OPENCLAW_ROOT, "update-check.json")
         MIN_INTERVAL_SEC = 6 * 3600  # 6 hours
 
@@ -658,40 +784,47 @@ class OpenclawService:
                 "checkedAt": last_checked_str,
             }
 
-        # If stale, fire background refresh for the next request
-        if needs_refresh:
-            def _bg_refresh():
-                npm_url = "https://registry.npmjs.org/openclaw/latest"
-                try:
-                    req = urllib.request.Request(
-                        npm_url,
-                        headers={
-                            "Accept": "application/json",
-                            "User-Agent": "openclaw-dashboard/1.0",
-                        },
-                    )
-                    with urllib.request.urlopen(req, timeout=15) as resp:
-                        data = json.loads(resp.read().decode("utf-8"))
-                    latest = data.get("version", "")
-                    if latest:
-                        now_iso = datetime.now(timezone.utc).isoformat()
-                        _atomic_write_json(update_check_path, {
-                            "lastCheckedAt": now_iso,
-                            "lastNotifiedVersion": latest,
-                            "lastNotifiedTag": "latest",
-                        })
-                except Exception:
-                    logger.exception("npm version refresh failed")
+        if not needs_refresh:
+            return result
 
-            threading.Thread(target=_bg_refresh, daemon=True).start()
+        # Coalesce concurrent stale-cache calls into one refresh.
+        lock = self._npm_refresh_lock()
+        with lock:
+            if OpenclawService._NPM_REFRESH_INFLIGHT:
+                return result
+            OpenclawService._NPM_REFRESH_INFLIGHT = True
 
+        def _bg_refresh():
+            npm_url = "https://registry.npmjs.org/openclaw/latest"
+            try:
+                req = urllib.request.Request(
+                    npm_url,
+                    headers={
+                        "Accept": "application/json",
+                        "User-Agent": "openclaw-dashboard/1.0",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                latest = data.get("version", "")
+                if latest:
+                    now_iso = datetime.now(timezone.utc).isoformat()
+                    _atomic_write_json(update_check_path, {
+                        "lastCheckedAt": now_iso,
+                        "lastNotifiedVersion": latest,
+                        "lastNotifiedTag": "latest",
+                    })
+            except Exception:
+                logger.exception("npm version refresh failed")
+            finally:
+                with lock:
+                    OpenclawService._NPM_REFRESH_INFLIGHT = False
+
+        threading.Thread(target=_bg_refresh, daemon=True, name="npm-refresh").start()
         return result
 
     def get_version_info(self) -> dict:
         """Get openclaw version and last update time."""
-        import subprocess
-        import re
-
         info = {
             "version": "unknown",
             "commit": "",
@@ -705,10 +838,12 @@ class OpenclawService:
         openclaw_bin = os.path.expanduser("~/.openclaw/tools/node-v22.22.0/bin/openclaw")
         node_bin_dir = os.path.expanduser("~/.openclaw/tools/node-v22.22.0/bin")
 
-        # Build PATH that includes node binary so launchd can run it
+        # Build PATH that includes node binary so launchd can run it.
+        # Use os.pathsep (":" on Unix, ";" on Windows) — a literal ":" produces
+        # a malformed PATH on Windows that silently breaks every subprocess.
         env = os.environ.copy()
         if node_bin_dir not in env.get("PATH", ""):
-            env["PATH"] = f"{node_bin_dir}:{env.get('PATH', '/usr/bin:/bin')}"
+            env["PATH"] = node_bin_dir + os.pathsep + env.get("PATH", "")
 
         # Method 1: try openclaw --version (with node in PATH)
         bin_to_try = openclaw_bin if os.path.exists(openclaw_bin) else "openclaw"
@@ -798,7 +933,13 @@ class OpenclawService:
         if not os.path.isdir(agents_dir):
             return active_agents
 
-        for agent_id in os.listdir(agents_dir):
+        try:
+            agent_ids = os.listdir(agents_dir)
+        except OSError as e:
+            logger.warning("listdir %s failed: %s", agents_dir, e)
+            return active_agents
+
+        for agent_id in agent_ids:
             sessions_file = os.path.join(agents_dir, agent_id, "sessions", "sessions.json")
             if not os.path.exists(sessions_file):
                 continue
@@ -837,57 +978,130 @@ class OpenclawService:
                 pass
         return {}
 
-    def _run_refresh_script(self, script_name: str) -> dict:
-        """Run a refresh script from the scripts directory."""
-        import subprocess
-        import sys
+    # Refresh-job state, keyed by provider. Each entry:
+    #   running:   bool
+    #   started_at: epoch seconds when current run began (or last started)
+    #   ended_at:   epoch seconds when last run finished (0 if never)
+    #   ok:         last run's success bool
+    #   output:     last run's stdout tail (success)
+    #   error:      last run's stderr/explanation tail (failure)
+    _REFRESH_JOBS: dict[str, dict] = {}
+    _REFRESH_JOBS_LOCK = None  # initialized lazily
+    _REFRESH_MIN_INTERVAL = 300.0  # 5 min between manual refreshes per provider
 
+    def _refresh_lock(self):
+        """Single-flight refresh lock — lazy because each test/import path
+        gets the same module-level OpenclawService instance."""
+        if OpenclawService._REFRESH_JOBS_LOCK is None:
+            OpenclawService._REFRESH_JOBS_LOCK = threading.Lock()
+        return OpenclawService._REFRESH_JOBS_LOCK
+
+    def _start_refresh_job(self, provider: str, script_name: str) -> dict:
+        """Spawn a refresh script in the background and return immediately.
+
+        Caller polls `get_refresh_status(provider)` for progress. Previous
+        behaviour blocked a request worker for up to 2 minutes — bad for
+        latency and bad for the Playwright login path (which can pop a
+        headed Chromium window that the request thread had no business
+        owning).
+        """
         candidates = [
             os.path.join(os.path.dirname(__file__), "..", "..", "scripts", script_name),
             os.path.join(os.path.dirname(__file__), "..", "..", "..", "scripts", script_name),
         ]
-        script = None
-        for c in candidates:
-            if os.path.exists(c):
-                script = c
-                break
-
+        script = next((c for c in candidates if os.path.exists(c)), None)
         if not script:
             return {"ok": False, "error": f"script not found: {script_name}"}
 
-        try:
-            result = subprocess.run(
-                [sys.executable, script],
-                capture_output=True, text=True, timeout=120,
-                cwd=os.path.dirname(script),
-            )
-            if result.returncode == 0:
-                return {"ok": True, "output": result.stdout.strip()[-500:]}
-            else:
-                return {"ok": False, "error": result.stderr.strip()[-500:]}
-        except subprocess.TimeoutExpired:
-            return {"ok": False, "error": "refresh timed out (2 min)"}
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
+        lock = self._refresh_lock()
+        with lock:
+            state = OpenclawService._REFRESH_JOBS.get(provider, {})
+            if state.get("running"):
+                return {
+                    "ok": False,
+                    "error": "refresh already running",
+                    "running": True,
+                    "started_at": state.get("started_at"),
+                }
+            ended_at = state.get("ended_at", 0)
+            if ended_at and (time.time() - ended_at) < OpenclawService._REFRESH_MIN_INTERVAL:
+                wait = int(OpenclawService._REFRESH_MIN_INTERVAL - (time.time() - ended_at))
+                return {
+                    "ok": False,
+                    "error": f"refresh rate-limited; retry in {wait}s",
+                    "ended_at": ended_at,
+                }
+            OpenclawService._REFRESH_JOBS[provider] = {
+                "running": True,
+                "started_at": time.time(),
+                "ended_at": 0,
+                "ok": False,
+                "output": "",
+                "error": "",
+            }
+
+        def _runner():
+            err = ""
+            ok = False
+            output = ""
+            try:
+                proc = subprocess.run(
+                    [sys.executable, script],
+                    capture_output=True, text=True, timeout=180,
+                    cwd=os.path.dirname(script),
+                )
+                if proc.returncode == 0:
+                    ok = True
+                    output = (proc.stdout or "").strip()[-500:]
+                else:
+                    err = (proc.stderr or "").strip()[-500:] or f"exit {proc.returncode}"
+            except subprocess.TimeoutExpired:
+                err = "refresh timed out (3 min)"
+            except Exception as e:
+                err = str(e)
+            with lock:
+                OpenclawService._REFRESH_JOBS[provider] = {
+                    "running": False,
+                    "started_at": OpenclawService._REFRESH_JOBS[provider]["started_at"],
+                    "ended_at": time.time(),
+                    "ok": ok,
+                    "output": output,
+                    "error": err,
+                }
+
+        threading.Thread(target=_runner, daemon=True, name=f"refresh-{provider}").start()
+        return {"ok": True, "running": True, "started_at": OpenclawService._REFRESH_JOBS[provider]["started_at"]}
+
+    def get_refresh_status(self, provider: str) -> dict:
+        with self._refresh_lock():
+            state = OpenclawService._REFRESH_JOBS.get(provider)
+            if not state:
+                return {"running": False, "started_at": 0, "ended_at": 0, "ok": False}
+            return dict(state)
 
     def refresh_minimax_usage(self) -> dict:
-        return self._run_refresh_script("refresh_minimax.py")
+        return self._start_refresh_job("minimax", "refresh_minimax.py")
 
     def refresh_deepseek_usage(self) -> dict:
-        return self._run_refresh_script("refresh_deepseek.py")
+        return self._start_refresh_job("deepseek", "refresh_deepseek.py")
 
     def get_active_sessions(self) -> list[dict]:
         """Return active sessions (updated within 15 min) for all agents."""
-        import time as _time
-        now_ms = int(_time.time() * 1000)
+        now_ms = int(time.time() * 1000)
         FIFTEEN_MIN_MS = 15 * 60 * 1000
 
         agents_dir = os.path.join(OPENCLAW_ROOT, "agents")
         if not os.path.isdir(agents_dir):
             return []
 
+        try:
+            agent_ids = os.listdir(agents_dir)
+        except OSError as e:
+            logger.warning("listdir %s failed: %s", agents_dir, e)
+            return []
+
         active_sessions = []
-        for agent_id in os.listdir(agents_dir):
+        for agent_id in agent_ids:
             sessions_file = os.path.join(agents_dir, agent_id, "sessions", "sessions.json")
             if not os.path.exists(sessions_file):
                 continue
@@ -940,6 +1154,11 @@ class OpenclawService:
         active_sessions.sort(key=lambda s: (s["isCron"], -s["updatedAtMs"]))
         return active_sessions
 
+    # Per-agent metrics cache. Sessions don't update faster than this; we
+    # do not need second-precision here. Cache key: agent_id -> (expiry_ts, payload).
+    _METRICS_CACHE: dict[str, tuple[float, dict]] = {}
+    _METRICS_TTL_SECONDS = 60.0
+
     def get_agent_metrics(self, agent_id: str) -> dict:
         """Aggregate daily message/token/response-time metrics from session jsonl files.
 
@@ -947,12 +1166,28 @@ class OpenclawService:
         - sessions.json sessionFile references (current sessions)
         - *.jsonl and *.jsonl.reset.* files in sessions/ dir (historical / reset sessions)
         - Skips *.trajectory.jsonl* (different format) and cron sessions
+
+        Optimizations:
+        - Per-agent cache with 60s TTL (this is hit on every /api/overview).
+        - Files whose mtime is older than the 7-day window are skipped — they
+          cannot contribute to "last 7 days" so reading them is wasted I/O.
+        - Streams lines (`for line in f`) instead of `f.readlines()` so a
+          single multi-MB session file doesn't pull its whole contents into
+          memory.
         """
         from collections import defaultdict
-        from datetime import datetime, timedelta
+
+        # Cache check.
+        now_mono = time.monotonic()
+        cached = OpenclawService._METRICS_CACHE.get(agent_id)
+        if cached is not None and cached[0] > now_mono:
+            return cached[1]
 
         sessions_dir = os.path.join(OPENCLAW_ROOT, "agents", agent_id, "sessions")
         sessions_file = os.path.join(sessions_dir, "sessions.json")
+
+        # Files older than this cannot contribute to the 7-day window.
+        cutoff_ts = time.time() - 8 * 86400  # one day of slack
 
         # Collect all candidate jsonl files, excluding cron sessions
         candidate_files: set[str] = set()
@@ -980,7 +1215,12 @@ class OpenclawService:
         #    OpenClaw renames old sessions to .jsonl.deleted.<ts> or .jsonl.reset.<ts>
         #    Also scan .jsonl.delete (old style) and .jsonl.checkpoint.* files
         if os.path.isdir(sessions_dir):
-            for fn in os.listdir(sessions_dir):
+            try:
+                session_files = os.listdir(sessions_dir)
+            except OSError as e:
+                logger.warning("listdir %s failed: %s", sessions_dir, e)
+                session_files = []
+            for fn in session_files:
                 # Skip trajectory files (different schema)
                 if "trajectory" in fn:
                     continue
@@ -1000,58 +1240,66 @@ class OpenclawService:
         daily_raw: dict[str, dict] = defaultdict(lambda: {"messages": 0, "tokens": 0, "response_times": []})
 
         for jsonl_path in candidate_files:
+            # Skip files older than the window — they can't contain any
+            # events that would land inside the last 7 days.
             try:
-                with open(jsonl_path, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
-            except Exception:
+                if os.path.getmtime(jsonl_path) < cutoff_ts:
+                    continue
+            except OSError:
                 continue
 
             prev_ts: Optional[datetime] = None
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except Exception:
-                    continue
+            try:
+                # Stream lines rather than readlines() — long files routinely
+                # exceed several MB and we don't need them all resident.
+                with open(jsonl_path, "r", encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            event = json.loads(line)
+                        except Exception:
+                            continue
 
-                if event.get("type") != "message":
-                    continue
+                        if event.get("type") != "message":
+                            continue
 
-                msg = event.get("message", {})
-                role = msg.get("role")
-                ts_str = event.get("timestamp") or msg.get("timestamp")
+                        msg = event.get("message", {})
+                        role = msg.get("role")
+                        ts_str = event.get("timestamp") or msg.get("timestamp")
 
-                if not ts_str:
-                    continue
+                        if not ts_str:
+                            continue
 
-                try:
-                    ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                except Exception:
-                    continue
-                # Normalize to UTC so date-bucketing matches the frontend's
-                # ISO date keys (also in UTC).
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-                else:
-                    ts = ts.astimezone(timezone.utc)
+                        try:
+                            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                        except Exception:
+                            continue
+                        # Normalize to UTC so date-bucketing matches the frontend's
+                        # ISO date keys (also in UTC).
+                        if ts.tzinfo is None:
+                            ts = ts.replace(tzinfo=timezone.utc)
+                        else:
+                            ts = ts.astimezone(timezone.utc)
 
-                date_key = ts.strftime("%Y-%m-%d")
+                        date_key = ts.strftime("%Y-%m-%d")
 
-                if role == "assistant":
-                    daily_raw[date_key]["messages"] += 1
-                    usage = msg.get("usage", {})
-                    tokens = usage.get("totalTokens") or usage.get("total_tokens") or 0
-                    if tokens:
-                        daily_raw[date_key]["tokens"] += tokens
+                        if role == "assistant":
+                            daily_raw[date_key]["messages"] += 1
+                            usage = msg.get("usage", {})
+                            tokens = usage.get("totalTokens") or usage.get("total_tokens") or 0
+                            if tokens:
+                                daily_raw[date_key]["tokens"] += tokens
 
-                    if prev_ts is not None:
-                        delta_ms = int((ts - prev_ts).total_seconds() * 1000)
-                        if 0 < delta_ms < 600_000:
-                            daily_raw[date_key]["response_times"].append(delta_ms)
-                elif role in ("user", "toolResult", "tool_result"):
-                    prev_ts = ts
+                            if prev_ts is not None:
+                                delta_ms = int((ts - prev_ts).total_seconds() * 1000)
+                                if 0 < delta_ms < 600_000:
+                                    daily_raw[date_key]["response_times"].append(delta_ms)
+                        elif role in ("user", "toolResult", "tool_result"):
+                            prev_ts = ts
+            except OSError:
+                continue
 
         # Build daily array for last 7 days (fill zeros for missing days)
         today = datetime.now(timezone.utc).date()
@@ -1074,10 +1322,15 @@ class OpenclawService:
             total_messages += raw["messages"]
             total_tokens += raw["tokens"]
 
-        return {
+        payload = {
             "daily": daily,
             "total": {"messages": total_messages, "tokens": total_tokens},
         }
+        OpenclawService._METRICS_CACHE[agent_id] = (
+            now_mono + OpenclawService._METRICS_TTL_SECONDS,
+            payload,
+        )
+        return payload
 
     def get_all_agents_metrics(self) -> list[dict]:
         """Return 7-day metrics summary for all agents, for comparison."""
@@ -1094,7 +1347,7 @@ class OpenclawService:
             result.append({
                 "id": aid,
                 "name": agent.get("_displayName", aid),
-                "emoji": agent.get("identity", {}).get("emoji") or (aid == "main" and "🎯" or "🤖"),
+                "emoji": agent.get("identity", {}).get("emoji") or ("🎯" if aid == "main" else "🤖"),
                 "status": agent.get("_status", "idle"),
                 "totalMessages": total.get("messages", 0),
                 "totalTokens": total.get("tokens", 0),

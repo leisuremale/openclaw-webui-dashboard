@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
-import { api, isAbort } from '../lib/api';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { api } from '../lib/api';
+import { usePolling } from '../lib/usePolling';
 import { cn, formatDuration, formatTime } from '../lib/utils';
 import {
   MessageSquare,
@@ -12,22 +13,7 @@ import {
   WifiOff,
   Zap,
 } from 'lucide-react';
-import type { Agent } from '../lib/types';
-
-interface ActiveSession {
-  agentId: string;
-  agentName: string;
-  sessionKey: string;
-  isCron: boolean;
-  status: string;
-  updatedAtMs: number;
-  startedAtMs: number;
-  channel: string;
-  model: string;
-  label: string;
-  systemSent: boolean;
-  chatType: string;
-}
+import type { ActiveSession, Agent } from '../lib/types';
 
 function formatAgo(ms: number): string {
   const diff = Date.now() - ms;
@@ -52,37 +38,28 @@ const channelIcons: Record<string, React.ElementType> = {
 };
 
 export function ActiveSessions() {
-  const [sessions, setSessions] = useState<ActiveSession[]>([]);
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [loading, setLoading] = useState(true);
   const [now, setNow] = useState<number>(() => Date.now());
 
+  const combinedFetcher = useCallback(
+    async (signal: AbortSignal): Promise<{ sessions: ActiveSession[]; agents: Agent[] }> => {
+      const [s, a] = await Promise.all([
+        api.sessions({ signal }),
+        api.agents({ signal }),
+      ]);
+      return { sessions: s, agents: a };
+    },
+    [],
+  );
+  const { data: combined, loading } = usePolling(combinedFetcher, 10000);
+  // useMemo so identity is stable across renders when `combined` is null;
+  // downstream useMemo deps would otherwise see a fresh [] every render.
+  const sessions = useMemo(() => combined?.sessions ?? [], [combined]);
+  const agents = useMemo(() => combined?.agents ?? [], [combined]);
+
+  // Tick `now` once a second so durations advance between 10s polls.
   useEffect(() => {
-    const ac = new AbortController();
-    const load = () => {
-      Promise.all([
-        api.sessions({ signal: ac.signal }).catch((err) => {
-          if (!isAbort(err)) console.warn('sessions load failed:', err);
-          return [] as ActiveSession[];
-        }),
-        api.agents({ signal: ac.signal }).catch((err) => {
-          if (!isAbort(err)) console.warn('agents load failed:', err);
-          return [] as Agent[];
-        }),
-      ]).then(([s, a]) => {
-        if (ac.signal.aborted) return;
-        setSessions(s);
-        setAgents(a);
-        setNow(Date.now());
-        setLoading(false);
-      });
-    };
-    load();
-    const iv = setInterval(load, 10000);
-    return () => {
-      clearInterval(iv);
-      ac.abort();
-    };
+    const iv = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(iv);
   }, []);
 
   const agentMap = useMemo(() => {
@@ -167,7 +144,7 @@ export function ActiveSessions() {
             用户会话 ({userSessions.length})
           </h3>
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-            {userSessions.map((session, idx) => {
+            {userSessions.map((session) => {
               const agent = agentMap.get(session.agentId) || { emoji: '🤖', name: session.agentName };
               const ChannelIcon = channelIcons[session.channel] || Globe;
               const isWaiting = !session.systemSent && session.status !== 'done';
@@ -180,7 +157,6 @@ export function ActiveSessions() {
                   channelIcon={ChannelIcon}
                   isWaiting={isWaiting}
                   now={now}
-                  idx={idx}
                 />
               );
             })}
@@ -196,7 +172,7 @@ export function ActiveSessions() {
             定时任务会话 ({cronSessions.length})
           </h3>
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-            {cronSessions.map((session, idx) => {
+            {cronSessions.map((session) => {
               const agent = agentMap.get(session.agentId) || { emoji: '🤖', name: session.agentName };
               return (
                 <SessionCard
@@ -204,7 +180,6 @@ export function ActiveSessions() {
                   session={session}
                   agent={agent}
                   now={now}
-                  idx={idx}
                 />
               );
             })}
@@ -221,14 +196,12 @@ function SessionCard({
   channelIcon: ChannelIcon,
   isWaiting,
   now,
-  idx,
 }: {
   session: ActiveSession;
   agent: { emoji: string; name: string };
   channelIcon?: React.ElementType;
   isWaiting?: boolean;
   now: number;
-  idx: number;
 }) {
   const statusLabel = session.isCron
     ? session.label || session.sessionKey.split(':').pop()?.slice(0, 30) || 'Cron'
@@ -243,10 +216,9 @@ function SessionCard({
   return (
     <div
       className={cn(
-        'glass-card glass-card-hover rounded-xl p-5 animate-in fade-in',
+        'glass-card glass-card-hover rounded-xl p-5',
         isActive && 'ring-1 ring-emerald-500/20'
       )}
-      style={{ animationDelay: `${idx * 50}ms` }}
     >
       {/* Top row: Agent + Status */}
       <div className="flex items-start justify-between mb-3">

@@ -1,9 +1,15 @@
-from fastapi import APIRouter, HTTPException
+from typing import Literal
+
+from fastapi import APIRouter
 from app.services.openclaw import service
 
 router = APIRouter(prefix="/api")
 
-ALLOWED_LOG_TYPES = {"stdout", "stderr"}
+# Constrained provider enum reused by both refresh endpoints. FastAPI maps
+# Literal path params into the schema and 422s anything outside the set,
+# instead of relying on a body-of-method `if provider == ...` check.
+ProviderName = Literal["minimax", "deepseek"]
+LogType = Literal["stdout", "stderr"]
 
 @router.get("/overview")
 def get_overview():
@@ -42,13 +48,8 @@ def get_log_analysis(lines: int = 500):
     return service.get_log_analysis(lines)
 
 @router.get("/logs/{log_type}")
-def get_logs(log_type: str, lines: int = 200):
+def get_logs(log_type: LogType, lines: int = 200):
     """Read tail of dashboard logs. log_type: stdout or stderr"""
-    if log_type not in ALLOWED_LOG_TYPES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid log_type. Allowed: {sorted(ALLOWED_LOG_TYPES)}",
-        )
     return service.get_logs(log_type, lines)
 
 @router.get("/version")
@@ -81,10 +82,17 @@ def get_model_usage():
     return service.get_model_usage()
 
 @router.post("/models/usage/refresh/{provider}")
-def refresh_model_usage(provider: str):
-    """Refresh model usage data for a provider."""
+def refresh_model_usage(provider: ProviderName):
+    """Kick off a usage refresh in the background.
+
+    Returns immediately with {ok, running, started_at}. Poll
+    /api/models/usage/refresh/{provider}/status for completion.
+    """
     if provider == "minimax":
         return service.refresh_minimax_usage()
-    if provider == "deepseek":
-        return service.refresh_deepseek_usage()
-    return {"ok": False, "error": f"unsupported provider: {provider}"}
+    return service.refresh_deepseek_usage()
+
+@router.get("/models/usage/refresh/{provider}/status")
+def refresh_model_usage_status(provider: ProviderName):
+    """Get the status of the most recent (or running) refresh for a provider."""
+    return service.get_refresh_status(provider)

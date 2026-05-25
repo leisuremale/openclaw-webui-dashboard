@@ -103,19 +103,6 @@ async def main():
 
     tmp_profile = tempfile.mkdtemp(prefix="chrome_mm_")
 
-    # Copy Chrome profile for cookies
-    for f in os.listdir(CHROME_PROFILE):
-        if any(f.startswith(p) for p in ["Cookies", "Login Data", "Preferences"]):
-            src = os.path.join(CHROME_PROFILE, f)
-            dst = os.path.join(tmp_profile, f)
-            try:
-                if os.path.isdir(src):
-                    shutil.copytree(src, dst)
-                else:
-                    shutil.copy2(src, dst)
-            except Exception:
-                pass
-
     usage_data = {
         "minimax": {
             "plan": "Unknown",
@@ -128,6 +115,25 @@ async def main():
     }
 
     try:
+        # Copy Chrome profile (cookies, login data) so the persistent context
+        # is already authed. Guarded — CHROME_PROFILE may not exist on every
+        # host and shouldn't crash the whole refresh.
+        try:
+            profile_entries = os.listdir(CHROME_PROFILE)
+        except OSError:
+            profile_entries = []
+        for f in profile_entries:
+            if any(f.startswith(p) for p in ["Cookies", "Login Data", "Preferences"]):
+                src = os.path.join(CHROME_PROFILE, f)
+                dst = os.path.join(tmp_profile, f)
+                try:
+                    if os.path.isdir(src):
+                        shutil.copytree(src, dst)
+                    else:
+                        shutil.copy2(src, dst)
+                except Exception:
+                    pass
+
         async with async_playwright() as p:
             try:
                 context = await p.chromium.launch_persistent_context(
@@ -163,8 +169,10 @@ async def main():
             except Exception as e:
                 usage_data["minimax"]["error"] = f"load: {e}"
                 _save(usage_data)
-                await context.close()
-                shutil.rmtree(tmp_profile, ignore_errors=True)
+                try:
+                    await context.close()
+                except Exception:
+                    pass
                 return
 
             # Check if login is needed
@@ -280,8 +288,11 @@ async def main():
                 pass
     except Exception as e:
         usage_data["minimax"]["error"] = f"unexpected: {e}"
+    finally:
+        # Always wipe the temp Chrome profile — it contains a copy of the
+        # user's cookies / login data and lingering in /tmp is leaky.
+        shutil.rmtree(tmp_profile, ignore_errors=True)
 
-    shutil.rmtree(tmp_profile, ignore_errors=True)
     _save(usage_data)
 
 

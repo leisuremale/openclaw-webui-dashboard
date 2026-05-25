@@ -1,48 +1,32 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { cn } from '../lib/utils';
-import { api, isAbort } from '../lib/api';
+import { api } from '../lib/api';
+import { usePolling } from '../lib/usePolling';
 import { Terminal, RefreshCw, AlertTriangle, AlertCircle, Info, Clock, Zap, ChevronDown, ChevronRight } from 'lucide-react';
+import type { LogAnalysis } from '../lib/types';
 
-interface LogInsight {
-  type: string;
-  severity: 'error' | 'warning' | 'info';
-  title: string;
-  detail: string;
-  agentId?: string;
-  agentName?: string;
-  maxAge?: number;
-  count?: number;
-  lastSeen?: string;
-  diagId?: string;
-  line?: string;
-}
-
-interface LogAnalysis {
-  insights: LogInsight[];
-  stats: Record<string, number>;
-  sources: string[];
-}
-
-async function fetchLogs(type: 'stdout' | 'stderr', signal?: AbortSignal): Promise<string[]> {
+async function fetchLogs(type: 'stdout' | 'stderr', signal: AbortSignal): Promise<string[]> {
   const data = await api.logs(type, { signal });
   return data.lines || [];
 }
 
 function highlightLine(line: string): { text: string; className: string } {
-  const lower = line.toLowerCase();
-  if (lower.includes('error') || lower.includes('exception') || lower.includes('traceback') || lower.includes('fail')) {
-    return { text: line, className: 'text-rose-400' };
-  }
-  if (lower.includes('warning') || lower.includes('warn')) {
-    return { text: line, className: 'text-amber-400' };
-  }
-  if (lower.includes('stuck session')) {
+  // Word-boundary matches so "verror" doesn't trigger an error highlight and
+  // "warning" isn't picked up by the "warn" branch twice. Order matters —
+  // "stuck session" and "timeout" must outrank generic error/warn coloring.
+  if (/\bstuck session\b/i.test(line)) {
     return { text: line, className: 'text-orange-400 font-medium' };
   }
-  if (lower.includes('timeout') || lower.includes('timed out')) {
+  if (/\b(timeout|timed out)\b/i.test(line)) {
     return { text: line, className: 'text-amber-300' };
   }
-  if (lower.includes('started') || lower.includes('running') || lower.includes('complete')) {
+  if (/\b(error|exception|traceback|fail(?:ed|ure)?)\b/i.test(line)) {
+    return { text: line, className: 'text-rose-400' };
+  }
+  if (/\b(warning|warn)\b/i.test(line)) {
+    return { text: line, className: 'text-amber-400' };
+  }
+  if (/\b(started|running|complete[d]?)\b/i.test(line)) {
     return { text: line, className: 'text-emerald-400' };
   }
   return { text: line, className: '' };
@@ -62,46 +46,32 @@ const severityConfig: Record<string, { icon: typeof AlertTriangle; color: string
 
 export function LogViewer() {
   const [activeTab, setActiveTab] = useState<'stdout' | 'stderr'>('stderr');
-  const [lines, setLines] = useState<string[]>([]);
-  const [loading, setLoading] = useState(true);
   const [autoScroll, setAutoScroll] = useState(true);
-  const [analysis, setAnalysis] = useState<LogAnalysis | null>(null);
   const [insightsOpen, setInsightsOpen] = useState(true);
+  // manualRefresh increments to force usePolling to refire when the user
+  // clicks the refresh button mid-interval.
+  const [manualRefresh, setManualRefresh] = useState(0);
   const containerRef = useRef<HTMLDivElement>(null);
-  const refetchRef = useRef<() => void>(() => {});
 
-  useEffect(() => {
-    const ac = new AbortController();
-    const load = () => {
-      setLoading(true);
-      fetchLogs(activeTab, ac.signal)
-        .then((l) => {
-          setLines(l);
-          setLoading(false);
-        })
-        .catch((err) => {
-          if (isAbort(err)) return;
-          console.warn('log fetch failed:', err);
-          setLoading(false);
-        });
-    };
-    const loadAnalysis = () => {
-      api
-        .logAnalysis({ signal: ac.signal })
-        .then((a: LogAnalysis) => setAnalysis(a))
-        .catch((err) => {
-          if (!isAbort(err)) console.warn('log analysis failed:', err);
-        });
-    };
-    refetchRef.current = () => { load(); loadAnalysis(); };
-    load();
-    loadAnalysis();
-    const iv = setInterval(() => { load(); loadAnalysis(); }, 10000);
-    return () => {
-      clearInterval(iv);
-      ac.abort();
-    };
-  }, [activeTab]);
+  const linesFetcher = useCallback(
+    (signal: AbortSignal) => fetchLogs(activeTab, signal),
+    [activeTab],
+  );
+  const analysisFetcher = useCallback(
+    (signal: AbortSignal) => api.logAnalysis({ signal }),
+    [],
+  );
+  const { data: linesData, loading } = usePolling<string[]>(
+    linesFetcher,
+    10000,
+    [activeTab, manualRefresh],
+  );
+  const { data: analysis } = usePolling<LogAnalysis>(
+    analysisFetcher,
+    10000,
+    [manualRefresh],
+  );
+  const lines = useMemo(() => linesData ?? [], [linesData]);
 
   useEffect(() => {
     if (autoScroll && containerRef.current) {
@@ -130,7 +100,7 @@ export function LogViewer() {
             自动滚动: {autoScroll ? '开' : '关'}
           </button>
           <button
-            onClick={() => refetchRef.current?.()}
+            onClick={() => setManualRefresh((n) => n + 1)}
             className="p-2 rounded-lg hover:bg-white/[0.04] text-slate-400 hover:text-slate-200 transition-colors"
             title="刷新"
           >
